@@ -42,6 +42,11 @@ struct Cli {
 enum Commands {
     /// Show session preview (used internally by fzf --preview)
     Preview { session_id: String },
+    /// Print shell integration code for your shell
+    Init {
+        /// Shell name (zsh, bash, fish)
+        shell: String,
+    },
 }
 
 fn history_file() -> PathBuf {
@@ -206,6 +211,35 @@ fn render_preview(session: &Session) -> String {
     output
 }
 
+fn cmd_init(shell: &str) {
+    match shell {
+        "zsh" => {
+            println!(
+                r#"function clauhist() {{ local cmd=$(command clauhist --print "$@"); [[ -n "$cmd" ]] && eval "$cmd"; }}"#
+            );
+        }
+        "bash" => {
+            println!(
+                r#"function clauhist() {{ local cmd=$(command clauhist --print "$@"); [[ -n "$cmd" ]] && eval "$cmd"; }}"#
+            );
+        }
+        "fish" => {
+            println!(
+                r#"function clauhist
+    set -l cmd (command clauhist --print $argv)
+    if test -n "$cmd"
+        eval $cmd
+    end
+end"#
+            );
+        }
+        _ => {
+            eprintln!("Unsupported shell: {}. Supported: zsh, bash, fish", shell);
+            std::process::exit(1);
+        }
+    }
+}
+
 fn cmd_preview(session_id: &str, raw: HashMap<String, Vec<HistoryEntry>>) {
     let sessions = build_sessions(raw);
     let session = match sessions.iter().find(|s| s.session_id == session_id) {
@@ -308,6 +342,9 @@ fn main() {
         .unwrap_or_else(|_| "clauhist".to_string());
 
     match cli.command {
+        Some(Commands::Init { shell }) => {
+            cmd_init(&shell);
+        }
         Some(Commands::Preview { session_id }) => {
             cmd_preview(&session_id, read_sessions());
         }

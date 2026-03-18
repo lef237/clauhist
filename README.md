@@ -84,23 +84,25 @@ The preview pane (toggle with `Ctrl-/`) shows the project path, timestamps, and 
 
 ---
 
+## Shell integration (recommended)
+
+By default, clauhist runs `cd` in a subshell, so your shell stays in the original directory after Claude exits. To stay in the project directory and enable `cd -` to go back, add shell integration:
+
+```sh
+# ~/.zshrc or ~/.bashrc
+eval "$(clauhist init zsh)"   # or bash, fish
+```
+
+With this, selecting a session changes your current shell's directory and resumes Claude. After Claude exits, you remain in the project directory, and `cd -` takes you back.
+
 ## `--print` flag
 
-Instead of spawning a subshell, print the shell command to stdout:
+Print the shell command to stdout instead of executing it (used internally by `clauhist init`):
 
 ```sh
 $ clauhist --print
 cd '/Users/you/projects/myapp' && claude --resume abc123-...
 ```
-
-This is useful for scripting or for making `cd` affect your current shell. Add this one-liner to `.zshrc`:
-
-```zsh
-# ~/.zshrc — optional shell integration
-function clauhist() { local cmd=$(command clauhist --print "$@"); [[ -n "$cmd" ]] && eval "$cmd"; }
-```
-
-With this wrapper, selecting a session changes your current directory and resumes Claude — no subshell involved.
 
 ---
 
