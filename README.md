@@ -95,15 +95,6 @@ eval "$(clauhist init zsh)"   # or bash, fish
 
 With this, selecting a session changes your current shell's directory and resumes Claude. After Claude exits, you remain in the project directory, and `cd -` takes you back.
 
-## `--print` flag
-
-Print the shell command to stdout instead of executing it (used internally by `clauhist init`):
-
-```sh
-$ clauhist --print
-cd '/Users/you/projects/myapp' && claude --resume abc123-...
-```
-
 ---
 
 ## Troubleshooting

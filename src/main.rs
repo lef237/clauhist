@@ -33,8 +33,7 @@ struct Session {
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
-    /// Print shell command to stdout instead of spawning a subshell
-    #[arg(long)]
+    #[arg(long, hide = true)]
     print: bool,
 }
 
