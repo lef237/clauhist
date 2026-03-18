@@ -213,7 +213,7 @@ fn render_preview(session: &Session) -> String {
     output
 }
 
-fn build_resume_cmd(project: &str, session_id: &str, print_mode: bool, zdotdir: Option<&str>) -> String {
+fn build_resume_cmd(project: &str, session_id: &str, print_mode: bool, zdotdir: Option<&str>, prev_dir: Option<&str>) -> String {
     let base = format!(
         "cd {} && claude --resume {}",
         shell_quote(project),
@@ -225,15 +225,22 @@ fn build_resume_cmd(project: &str, session_id: &str, print_mode: bool, zdotdir: 
         let zdotdir_env = zdotdir
             .map(|d| format!("ZDOTDIR={} ", shell_quote(d)))
             .unwrap_or_default();
+        let prev_dir_env = prev_dir
+            .map(|d| format!("CLAUHIST_PREV_DIR={} ", shell_quote(d)))
+            .unwrap_or_default();
+        let back_msg = prev_dir
+            .map(|d| format!("Type exit or clauhist --return to go back to {d}."))
+            .unwrap_or_else(|| "Type exit or clauhist --return to go back.".to_string());
         format!(
-            "{}; echo ''; echo 'Claude session ended. Type exit or clauhist --return to go back.'; CLAUHIST_SHELL=1 {}exec zsh -i",
-            base, zdotdir_env
+            "{}; echo ''; echo 'Claude session ended. {back_msg}'; CLAUHIST_SHELL=1 {prev_dir_env}{zdotdir_env}exec zsh -i",
+            base
         )
     }
 }
 
 fn setup_clauhist_zdotdir() -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("clauhist-zdotdir-{}", std::process::id()));
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    let dir = PathBuf::from(home).join(".cache").join("clauhist").join("zdotdir");
     let _ = std::fs::create_dir_all(&dir);
 
     let orig_zdotdir = std::env::var("ZDOTDIR")
@@ -323,7 +330,11 @@ fn cmd_return() {
         }
     };
 
-    eprintln!("Returned to original shell.");
+    let prev_dir = std::env::var("CLAUHIST_PREV_DIR").ok();
+    match &prev_dir {
+        Some(d) => eprintln!("Returned to previous shell. ({d})"),
+        None => eprintln!("Returned to previous shell."),
+    }
 
     // SIGKILL terminates the parent shell instantly — no signal handler runs,
     // so no "jobs SIGHUPed" or "hangup" warnings appear.
@@ -403,11 +414,20 @@ fn cmd_browse(sessions: Vec<Session>, print_mode: bool, exe_path: &str) {
     let project = fields[2].trim_start_matches(['✓', '✗', ' ']);
 
     if print_mode {
-        let shell_cmd = build_resume_cmd(project, session_id, true, None);
+        let shell_cmd = build_resume_cmd(project, session_id, true, None, None);
         println!("{}", shell_cmd);
     } else {
         let zdotdir = setup_clauhist_zdotdir();
-        let shell_cmd = build_resume_cmd(project, session_id, false, Some(zdotdir.to_str().unwrap()));
+        let prev_dir = std::env::current_dir()
+            .map(|p| p.to_string_lossy().into_owned())
+            .ok();
+        let shell_cmd = build_resume_cmd(
+            project,
+            session_id,
+            false,
+            Some(zdotdir.to_str().unwrap()),
+            prev_dir.as_deref(),
+        );
         let _ = Command::new("zsh").arg("-c").arg(&shell_cmd).status();
     }
 }
@@ -575,7 +595,7 @@ not json
 
     #[test]
     fn build_resume_cmd_print_mode_generates_simple_cd_and_resume() {
-        let cmd = build_resume_cmd("/tmp/my-project", "abc-123", true, None);
+        let cmd = build_resume_cmd("/tmp/my-project", "abc-123", true, None, None);
         assert_eq!(cmd, "cd '/tmp/my-project' && claude --resume abc-123");
         assert!(!cmd.contains("CLAUHIST_SHELL"));
         assert!(!cmd.contains("exec zsh"));
@@ -584,27 +604,30 @@ not json
 
     #[test]
     fn build_resume_cmd_default_mode_includes_subshell_and_env_var() {
-        let cmd = build_resume_cmd("/tmp/my-project", "abc-123", false, Some("/tmp/zd"));
+        let cmd = build_resume_cmd("/tmp/my-project", "abc-123", false, Some("/tmp/zd"), Some("/home/user"));
         assert!(cmd.starts_with("cd '/tmp/my-project' && claude --resume abc-123;"));
         assert!(cmd.contains("CLAUHIST_SHELL=1"));
         assert!(cmd.contains("ZDOTDIR='/tmp/zd'"));
+        assert!(cmd.contains("CLAUHIST_PREV_DIR='/home/user'"));
+        assert!(cmd.contains("go back to /home/user"));
         assert!(cmd.contains("exec zsh -i"));
         assert!(cmd.contains("clauhist --return"));
     }
 
     #[test]
     fn build_resume_cmd_default_mode_without_zdotdir() {
-        let cmd = build_resume_cmd("/tmp/my-project", "abc-123", false, None);
+        let cmd = build_resume_cmd("/tmp/my-project", "abc-123", false, None, None);
         assert!(cmd.contains("CLAUHIST_SHELL=1 exec zsh -i"));
         assert!(!cmd.contains("ZDOTDIR"));
+        assert!(cmd.contains("go back."));
     }
 
     #[test]
     fn build_resume_cmd_quotes_project_path_with_special_chars() {
-        let cmd = build_resume_cmd("/tmp/it's here", "sess-1", true, None);
+        let cmd = build_resume_cmd("/tmp/it's here", "sess-1", true, None, None);
         assert_eq!(cmd, "cd '/tmp/it'\\''s here' && claude --resume sess-1");
 
-        let cmd = build_resume_cmd("/tmp/it's here", "sess-1", false, None);
+        let cmd = build_resume_cmd("/tmp/it's here", "sess-1", false, None, None);
         assert!(cmd.starts_with("cd '/tmp/it'\\''s here' && claude --resume sess-1;"));
     }
 
