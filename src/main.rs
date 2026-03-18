@@ -7,7 +7,7 @@ use chrono::Local;
 use clap::{Parser, Subcommand};
 use serde::Deserialize;
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 struct HistoryEntry {
     #[serde(rename = "sessionId", default)]
     session_id: String,
@@ -16,6 +16,7 @@ struct HistoryEntry {
     project: Option<String>,
 }
 
+#[derive(Debug)]
 struct Session {
     session_id: String,
     project: String,
@@ -25,7 +26,10 @@ struct Session {
 }
 
 #[derive(Parser)]
-#[command(name = "clauhist", about = "Browse and resume Claude Code chat sessions")]
+#[command(
+    name = "clauhist",
+    about = "Browse and resume Claude Code chat sessions"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -48,12 +52,7 @@ fn history_file() -> PathBuf {
     PathBuf::from(home).join(".claude").join("history.jsonl")
 }
 
-fn read_sessions() -> HashMap<String, Vec<HistoryEntry>> {
-    let path = history_file();
-    let content = match std::fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(_) => return HashMap::new(),
-    };
+fn parse_sessions(content: &str) -> HashMap<String, Vec<HistoryEntry>> {
     let mut sessions: HashMap<String, Vec<HistoryEntry>> = HashMap::new();
     for line in content.lines() {
         let line = line.trim();
@@ -62,11 +61,23 @@ fn read_sessions() -> HashMap<String, Vec<HistoryEntry>> {
         }
         if let Ok(entry) = serde_json::from_str::<HistoryEntry>(line) {
             if !entry.session_id.is_empty() {
-                sessions.entry(entry.session_id.clone()).or_default().push(entry);
+                sessions
+                    .entry(entry.session_id.clone())
+                    .or_default()
+                    .push(entry);
             }
         }
     }
     sessions
+}
+
+fn read_sessions() -> HashMap<String, Vec<HistoryEntry>> {
+    let path = history_file();
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return HashMap::new(),
+    };
+    parse_sessions(&content)
 }
 
 fn build_sessions(raw: HashMap<String, Vec<HistoryEntry>>) -> Vec<Session> {
@@ -91,7 +102,13 @@ fn build_sessions(raw: HashMap<String, Vec<HistoryEntry>>) -> Vec<Session> {
                     }
                 })
                 .collect();
-            Session { session_id, project, first_ts, last_ts, messages }
+            Session {
+                session_id,
+                project,
+                first_ts,
+                last_ts,
+                messages,
+            }
         })
         .collect();
     sessions.sort_by(|a, b| b.last_ts.cmp(&a.last_ts));
@@ -114,7 +131,11 @@ fn shell_quote(path: &str) -> String {
 
 fn format_ts_datetime(ms: u64) -> String {
     chrono::DateTime::from_timestamp_millis(ms as i64)
-        .map(|dt| dt.with_timezone(&Local).format("%Y-%m-%d %H:%M").to_string())
+        .map(|dt| {
+            dt.with_timezone(&Local)
+                .format("%Y-%m-%d %H:%M")
+                .to_string()
+        })
         .unwrap_or_else(|| "unknown".to_string())
 }
 
@@ -139,7 +160,11 @@ fn format_for_fzf(sessions: &[Session]) -> Vec<String> {
         .iter()
         .map(|s| {
             let date_str = format_ts_datetime(s.last_ts);
-            let exists = if std::path::Path::new(&s.project).exists() { "✓" } else { "✗" };
+            let exists = if std::path::Path::new(&s.project).exists() {
+                "✓"
+            } else {
+                "✗"
+            };
             let first_msg = s
                 .messages
                 .first()
@@ -147,10 +172,38 @@ fn format_for_fzf(sessions: &[Session]) -> Vec<String> {
                 .unwrap_or_default();
             format!(
                 "{}\t{}\t{} {}\t{}\t({})",
-                s.session_id, date_str, exists, s.project, first_msg, s.messages.len()
+                s.session_id,
+                date_str,
+                exists,
+                s.project,
+                first_msg,
+                s.messages.len()
             )
         })
         .collect()
+}
+
+fn render_preview(session: &Session) -> String {
+    let mut output = format!(
+        "Project : {}\nSession : {}\nStarted : {}\nLast    : {}\nMessages: {}\n{}\n",
+        session.project,
+        session.session_id,
+        format_ts_datetime(session.first_ts),
+        format_ts_datetime(session.last_ts),
+        session.messages.len(),
+        "─".repeat(60)
+    );
+
+    for (ts, msg) in &session.messages {
+        let clean = msg.replace('\n', " ");
+        output.push_str(&format!(
+            "[{}] {}\n",
+            format_ts_time(*ts),
+            truncate(&clean, 120)
+        ));
+    }
+
+    output
 }
 
 fn cmd_preview(session_id: &str, raw: HashMap<String, Vec<HistoryEntry>>) {
@@ -162,16 +215,7 @@ fn cmd_preview(session_id: &str, raw: HashMap<String, Vec<HistoryEntry>>) {
             return;
         }
     };
-    println!("Project : {}", session.project);
-    println!("Session : {}", session.session_id);
-    println!("Started : {}", format_ts_datetime(session.first_ts));
-    println!("Last    : {}", format_ts_datetime(session.last_ts));
-    println!("Messages: {}", session.messages.len());
-    println!("{}", "─".repeat(60));
-    for (ts, msg) in &session.messages {
-        let clean = msg.replace('\n', " ");
-        println!("[{}] {}", format_ts_time(*ts), truncate(&clean, 120));
-    }
+    print!("{}", render_preview(session));
 }
 
 fn cmd_browse(sessions: Vec<Session>, print_mode: bool, exe_path: &str) {
@@ -243,7 +287,11 @@ fn cmd_browse(sessions: Vec<Session>, print_mode: bool, exe_path: &str) {
 
     let session_id = fields[0];
     let project = fields[2].trim_start_matches(['✓', '✗', ' ']);
-    let shell_cmd = format!("cd {} && claude --resume {}", shell_quote(project), session_id);
+    let shell_cmd = format!(
+        "cd {} && claude --resume {}",
+        shell_quote(project),
+        session_id
+    );
 
     if print_mode {
         println!("{}", shell_cmd);
@@ -277,5 +325,142 @@ fn main() {
             }
             cmd_browse(sessions, cli.print, &exe_path);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn history_entry(
+        session_id: &str,
+        display: Option<&str>,
+        timestamp: Option<u64>,
+        project: Option<&str>,
+    ) -> HistoryEntry {
+        HistoryEntry {
+            session_id: session_id.to_string(),
+            display: display.map(str::to_string),
+            timestamp,
+            project: project.map(str::to_string),
+        }
+    }
+
+    fn unique_temp_path(label: &str) -> PathBuf {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("clauhist-{label}-{suffix}"))
+    }
+
+    #[test]
+    fn parse_sessions_skips_blank_invalid_and_missing_session_ids() {
+        let raw = r#"
+{"sessionId":"alpha","display":"first","timestamp":10,"project":"/tmp/a"}
+not json
+{"sessionId":"","display":"ignored","timestamp":20,"project":"/tmp/a"}
+
+{"sessionId":"alpha","display":"second","timestamp":30,"project":"/tmp/a"}
+"#;
+
+        let sessions = parse_sessions(raw);
+
+        assert_eq!(sessions.len(), 1);
+        let alpha = sessions.get("alpha").unwrap();
+        assert_eq!(alpha.len(), 2);
+        assert_eq!(alpha[0].display.as_deref(), Some("first"));
+        assert_eq!(alpha[1].display.as_deref(), Some("second"));
+    }
+
+    #[test]
+    fn build_sessions_sorts_entries_filters_empty_messages_and_orders_by_recent_activity() {
+        let mut raw = HashMap::new();
+        raw.insert(
+            "older".to_string(),
+            vec![
+                history_entry("older", Some("later"), Some(30), Some("/tmp/older")),
+                history_entry("older", Some(""), Some(20), Some("/tmp/older")),
+                history_entry("older", Some("first"), Some(10), Some("/tmp/older")),
+            ],
+        );
+        raw.insert(
+            "newer".to_string(),
+            vec![history_entry(
+                "newer",
+                Some("recent"),
+                Some(100),
+                Some("/tmp/newer"),
+            )],
+        );
+
+        let sessions = build_sessions(raw);
+
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions[0].session_id, "newer");
+        assert_eq!(sessions[0].last_ts, 100);
+
+        let older = &sessions[1];
+        assert_eq!(older.project, "/tmp/older");
+        assert_eq!(older.first_ts, 10);
+        assert_eq!(older.last_ts, 30);
+        assert_eq!(older.messages.len(), 2);
+        assert_eq!(older.messages[0], (10, "first".to_string()));
+        assert_eq!(older.messages[1], (30, "later".to_string()));
+    }
+
+    #[test]
+    fn truncate_respects_character_boundaries() {
+        assert_eq!(truncate("こんにちは世界", 4), "こんにち…");
+        assert_eq!(truncate("rust", 4), "rust");
+    }
+
+    #[test]
+    fn shell_quote_escapes_single_quotes() {
+        assert_eq!(shell_quote("/tmp/it's here"), "'/tmp/it'\\''s here'");
+    }
+
+    #[test]
+    fn format_for_fzf_marks_existing_projects_and_sanitizes_message_preview() {
+        let existing_dir = unique_temp_path("project");
+        std::fs::create_dir_all(&existing_dir).unwrap();
+
+        let session = Session {
+            session_id: "session-1".to_string(),
+            project: existing_dir.display().to_string(),
+            first_ts: 0,
+            last_ts: 0,
+            messages: vec![(0, "hello\tworld\nagain".to_string())],
+        };
+
+        let lines = format_for_fzf(&[session]);
+        let fields: Vec<&str> = lines[0].split('\t').collect();
+
+        assert_eq!(fields[0], "session-1");
+        assert!(fields[2].starts_with(&format!("✓ {}", existing_dir.display())));
+        assert_eq!(fields[3], "hello world again");
+        assert_eq!(fields[4], "(1)");
+
+        std::fs::remove_dir_all(existing_dir).unwrap();
+    }
+
+    #[test]
+    fn render_preview_formats_metadata_and_message_lines() {
+        let invalid_ms = i64::MAX as u64;
+        let preview = render_preview(&Session {
+            session_id: "session-1".to_string(),
+            project: "/tmp/example".to_string(),
+            first_ts: invalid_ms,
+            last_ts: invalid_ms,
+            messages: vec![(invalid_ms, "line one\nline two".to_string())],
+        });
+
+        assert!(preview.contains("Project : /tmp/example"));
+        assert!(preview.contains("Session : session-1"));
+        assert!(preview.contains("Started : unknown"));
+        assert!(preview.contains("Last    : unknown"));
+        assert!(preview.contains("Messages: 1"));
+        assert!(preview.contains("[??:??] line one line two"));
     }
 }
