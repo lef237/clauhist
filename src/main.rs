@@ -35,6 +35,9 @@ struct Cli {
     command: Option<Commands>,
     #[arg(long, hide = true)]
     print: bool,
+    /// Exit the clauhist sub-shell and return to the original shell
+    #[arg(long = "return")]
+    return_flag: bool,
 }
 
 #[derive(Subcommand)]
@@ -251,6 +254,35 @@ fn cmd_preview(session_id: &str, raw: HashMap<String, Vec<HistoryEntry>>) {
     print!("{}", render_preview(session));
 }
 
+fn cmd_return() {
+    if std::env::var("CLAUHIST_SHELL").is_err() {
+        eprintln!("Not inside a clauhist sub-shell.");
+        std::process::exit(1);
+    }
+
+    let pid = std::process::id();
+    let ppid_output = Command::new("ps")
+        .args(["-o", "ppid=", "-p", &pid.to_string()])
+        .output();
+
+    match ppid_output {
+        Ok(output) => {
+            let ppid = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if ppid.is_empty() {
+                eprintln!("Could not determine parent shell PID.");
+                std::process::exit(1);
+            }
+            let _ = Command::new("kill")
+                .args(["-HUP", &ppid])
+                .status();
+        }
+        Err(e) => {
+            eprintln!("Failed to get parent PID: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
 fn cmd_browse(sessions: Vec<Session>, print_mode: bool, exe_path: &str) {
     if !fzf_is_available() {
         eprintln!("fzf not found. Install with: brew install fzf");
@@ -329,6 +361,11 @@ fn cmd_browse(sessions: Vec<Session>, print_mode: bool, exe_path: &str) {
     if print_mode {
         println!("{}", shell_cmd);
     } else {
+        let shell_cmd = format!(
+            "cd {} && claude --resume {}; echo ''; echo 'Claude session ended. Type exit or clauhist --return to go back.'; CLAUHIST_SHELL=1 exec zsh -i",
+            shell_quote(project),
+            session_id
+        );
         let _ = Command::new("zsh").arg("-c").arg(&shell_cmd).status();
     }
 }
@@ -339,6 +376,11 @@ fn main() {
     let exe_path = std::env::current_exe()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_else(|_| "clauhist".to_string());
+
+    if cli.return_flag {
+        cmd_return();
+        return;
+    }
 
     match cli.command {
         Some(Commands::Init { shell }) => {
