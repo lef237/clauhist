@@ -213,6 +213,26 @@ fn render_preview(session: &Session) -> String {
     output
 }
 
+fn build_resume_cmd(project: &str, session_id: &str, print_mode: bool) -> String {
+    if print_mode {
+        format!(
+            "cd {} && claude --resume {}",
+            shell_quote(project),
+            session_id
+        )
+    } else {
+        format!(
+            "cd {} && claude --resume {}; echo ''; echo 'Claude session ended. Type exit or clauhist --return to go back.'; CLAUHIST_SHELL=1 exec zsh -i",
+            shell_quote(project),
+            session_id
+        )
+    }
+}
+
+fn is_clauhist_shell() -> bool {
+    std::env::var("CLAUHIST_SHELL").is_ok()
+}
+
 fn cmd_init(shell: &str) {
     match shell {
         "zsh" => {
@@ -254,33 +274,39 @@ fn cmd_preview(session_id: &str, raw: HashMap<String, Vec<HistoryEntry>>) {
     print!("{}", render_preview(session));
 }
 
+fn get_ppid() -> Option<i32> {
+    let pid = std::process::id();
+    let output = Command::new("ps")
+        .args(["-o", "ppid=", "-p", &pid.to_string()])
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<i32>()
+        .ok()
+}
+
 fn cmd_return() {
-    if std::env::var("CLAUHIST_SHELL").is_err() {
+    if !is_clauhist_shell() {
         eprintln!("Not inside a clauhist sub-shell.");
         std::process::exit(1);
     }
 
-    let pid = std::process::id();
-    let ppid_output = Command::new("ps")
-        .args(["-o", "ppid=", "-p", &pid.to_string()])
-        .output();
-
-    match ppid_output {
-        Ok(output) => {
-            let ppid = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            if ppid.is_empty() {
-                eprintln!("Could not determine parent shell PID.");
-                std::process::exit(1);
-            }
-            let _ = Command::new("kill")
-                .args(["-HUP", &ppid])
-                .status();
-        }
-        Err(e) => {
-            eprintln!("Failed to get parent PID: {}", e);
+    let ppid = match get_ppid() {
+        Some(p) => p,
+        None => {
+            eprintln!("Could not determine parent shell PID.");
             std::process::exit(1);
         }
-    }
+    };
+
+    eprintln!("Returned to original shell.");
+
+    // SIGKILL terminates the parent shell instantly — no signal handler runs,
+    // so no "jobs SIGHUPed" or "hangup" warnings appear.
+    unsafe { libc::kill(ppid, libc::SIGKILL); }
+
+    std::process::exit(0);
 }
 
 fn cmd_browse(sessions: Vec<Session>, print_mode: bool, exe_path: &str) {
@@ -352,20 +378,11 @@ fn cmd_browse(sessions: Vec<Session>, print_mode: bool, exe_path: &str) {
 
     let session_id = fields[0];
     let project = fields[2].trim_start_matches(['✓', '✗', ' ']);
-    let shell_cmd = format!(
-        "cd {} && claude --resume {}",
-        shell_quote(project),
-        session_id
-    );
+    let shell_cmd = build_resume_cmd(project, session_id, print_mode);
 
     if print_mode {
         println!("{}", shell_cmd);
     } else {
-        let shell_cmd = format!(
-            "cd {} && claude --resume {}; echo ''; echo 'Claude session ended. Type exit or clauhist --return to go back.'; CLAUHIST_SHELL=1 exec zsh -i",
-            shell_quote(project),
-            session_id
-        );
         let _ = Command::new("zsh").arg("-c").arg(&shell_cmd).status();
     }
 }
@@ -410,6 +427,14 @@ fn main() {
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn clauhist_bin() -> PathBuf {
+        let mut path = std::env::current_exe().unwrap();
+        path.pop(); // test binary name
+        path.pop(); // deps/
+        path.push("clauhist");
+        path
+    }
 
     fn history_entry(
         session_id: &str,
@@ -521,6 +546,77 @@ not json
         assert_eq!(fields[4], "(1)");
 
         std::fs::remove_dir_all(existing_dir).unwrap();
+    }
+
+    #[test]
+    fn build_resume_cmd_print_mode_generates_simple_cd_and_resume() {
+        let cmd = build_resume_cmd("/tmp/my-project", "abc-123", true);
+        assert_eq!(cmd, "cd '/tmp/my-project' && claude --resume abc-123");
+        assert!(!cmd.contains("CLAUHIST_SHELL"));
+        assert!(!cmd.contains("exec zsh"));
+    }
+
+    #[test]
+    fn build_resume_cmd_default_mode_includes_subshell_and_env_var() {
+        let cmd = build_resume_cmd("/tmp/my-project", "abc-123", false);
+        assert!(cmd.starts_with("cd '/tmp/my-project' && claude --resume abc-123;"));
+        assert!(cmd.contains("CLAUHIST_SHELL=1"));
+        assert!(cmd.contains("exec zsh -i"));
+        assert!(cmd.contains("clauhist --return"));
+    }
+
+    #[test]
+    fn build_resume_cmd_quotes_project_path_with_special_chars() {
+        let cmd = build_resume_cmd("/tmp/it's here", "sess-1", true);
+        assert_eq!(cmd, "cd '/tmp/it'\\''s here' && claude --resume sess-1");
+
+        let cmd = build_resume_cmd("/tmp/it's here", "sess-1", false);
+        assert!(cmd.starts_with("cd '/tmp/it'\\''s here' && claude --resume sess-1;"));
+    }
+
+    #[test]
+    fn cmd_init_zsh_output_contains_print_flag() {
+        let output = std::process::Command::new(clauhist_bin().to_str().unwrap())
+            .args(["init", "zsh"])
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("--print"), "shell integration must pass --print to binary");
+        assert!(stdout.contains("eval"), "shell integration must eval the output");
+    }
+
+    #[test]
+    fn cmd_init_bash_output_contains_print_flag() {
+        let output = std::process::Command::new(clauhist_bin().to_str().unwrap())
+            .args(["init", "bash"])
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("--print"), "shell integration must pass --print to binary");
+        assert!(stdout.contains("eval"), "shell integration must eval the output");
+    }
+
+    #[test]
+    fn cmd_init_fish_output_contains_print_flag() {
+        let output = std::process::Command::new(clauhist_bin().to_str().unwrap())
+            .args(["init", "fish"])
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("--print"), "shell integration must pass --print to binary");
+        assert!(stdout.contains("eval"), "shell integration must eval the output");
+    }
+
+    #[test]
+    fn return_flag_outside_clauhist_shell_exits_with_error() {
+        let output = std::process::Command::new(clauhist_bin().to_str().unwrap())
+            .arg("--return")
+            .env_remove("CLAUHIST_SHELL")
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("Not inside a clauhist sub-shell"));
     }
 
     #[test]
