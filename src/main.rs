@@ -213,7 +213,7 @@ fn render_preview(session: &Session) -> String {
     output
 }
 
-fn build_resume_cmd(project: &str, session_id: &str, print_mode: bool, zdotdir: Option<&str>, prev_dir: Option<&str>) -> String {
+fn build_resume_cmd(project: &str, session_id: &str, print_mode: bool, zdotdir: Option<&str>, prev_dir: Option<&str>, depth: u32) -> String {
     let base = format!(
         "cd {} && claude --resume {}",
         shell_quote(project),
@@ -232,35 +232,46 @@ fn build_resume_cmd(project: &str, session_id: &str, print_mode: bool, zdotdir: 
             .map(|d| format!("Type exit or clauhist --return to go back to {d}."))
             .unwrap_or_else(|| "Type exit or clauhist --return to go back.".to_string());
         format!(
-            "{}; echo ''; echo 'Claude session ended. {back_msg}'; CLAUHIST_SHELL=1 {prev_dir_env}{zdotdir_env}exec zsh -i",
+            "{}; echo ''; echo 'Claude session ended. {back_msg}'; CLAUHIST_SHELL={depth} {prev_dir_env}{zdotdir_env}exec zsh -i",
             base
         )
     }
 }
 
-fn setup_clauhist_zdotdir() -> PathBuf {
+fn setup_clauhist_zdotdir(depth: u32) -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-    let dir = PathBuf::from(home).join(".cache").join("clauhist").join("zdotdir");
+    let dir = PathBuf::from(home).join(".cache").join("clauhist").join(format!("zdotdir-{depth}"));
     let _ = std::fs::create_dir_all(&dir);
 
     let orig_zdotdir = std::env::var("ZDOTDIR")
         .unwrap_or_else(|_| std::env::var("HOME").unwrap_or_default());
 
+    let indicator = if depth > 1 {
+        format!("[clauhist({depth})]")
+    } else {
+        "[clauhist]".to_string()
+    };
+
     let zshrc = format!(
         "ZDOTDIR={orig}\n\
          [[ -f \"$ZDOTDIR/.zshrc\" ]] && source \"$ZDOTDIR/.zshrc\"\n\
-         PROMPT=\"%F{{cyan}}[clauhist]%f $PROMPT\"\n\
-         trap \"rm -rf {dir}\" EXIT\n",
+         PROMPT=\"%F{{cyan}}{indicator}%f $PROMPT\"\n",
         orig = shell_quote(&orig_zdotdir),
-        dir = shell_quote(&dir.display().to_string()),
     );
 
     let _ = std::fs::write(dir.join(".zshrc"), zshrc);
     dir
 }
 
+fn clauhist_depth() -> u32 {
+    std::env::var("CLAUHIST_SHELL")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(0)
+}
+
 fn is_clauhist_shell() -> bool {
-    std::env::var("CLAUHIST_SHELL").is_ok()
+    clauhist_depth() > 0
 }
 
 fn cmd_init(shell: &str) {
@@ -414,10 +425,11 @@ fn cmd_browse(sessions: Vec<Session>, print_mode: bool, exe_path: &str) {
     let project = fields[2].trim_start_matches(['✓', '✗', ' ']);
 
     if print_mode {
-        let shell_cmd = build_resume_cmd(project, session_id, true, None, None);
+        let shell_cmd = build_resume_cmd(project, session_id, true, None, None, 0);
         println!("{}", shell_cmd);
     } else {
-        let zdotdir = setup_clauhist_zdotdir();
+        let depth = clauhist_depth() + 1;
+        let zdotdir = setup_clauhist_zdotdir(depth);
         let prev_dir = std::env::current_dir()
             .map(|p| p.to_string_lossy().into_owned())
             .ok();
@@ -427,6 +439,7 @@ fn cmd_browse(sessions: Vec<Session>, print_mode: bool, exe_path: &str) {
             false,
             Some(zdotdir.to_str().unwrap()),
             prev_dir.as_deref(),
+            depth,
         );
         let _ = Command::new("zsh").arg("-c").arg(&shell_cmd).status();
     }
@@ -595,7 +608,7 @@ not json
 
     #[test]
     fn build_resume_cmd_print_mode_generates_simple_cd_and_resume() {
-        let cmd = build_resume_cmd("/tmp/my-project", "abc-123", true, None, None);
+        let cmd = build_resume_cmd("/tmp/my-project", "abc-123", true, None, None, 0);
         assert_eq!(cmd, "cd '/tmp/my-project' && claude --resume abc-123");
         assert!(!cmd.contains("CLAUHIST_SHELL"));
         assert!(!cmd.contains("exec zsh"));
@@ -604,7 +617,7 @@ not json
 
     #[test]
     fn build_resume_cmd_default_mode_includes_subshell_and_env_var() {
-        let cmd = build_resume_cmd("/tmp/my-project", "abc-123", false, Some("/tmp/zd"), Some("/home/user"));
+        let cmd = build_resume_cmd("/tmp/my-project", "abc-123", false, Some("/tmp/zd"), Some("/home/user"), 1);
         assert!(cmd.starts_with("cd '/tmp/my-project' && claude --resume abc-123;"));
         assert!(cmd.contains("CLAUHIST_SHELL=1"));
         assert!(cmd.contains("ZDOTDIR='/tmp/zd'"));
@@ -615,8 +628,14 @@ not json
     }
 
     #[test]
+    fn build_resume_cmd_nested_depth_is_reflected() {
+        let cmd = build_resume_cmd("/tmp/p", "s1", false, None, None, 3);
+        assert!(cmd.contains("CLAUHIST_SHELL=3"));
+    }
+
+    #[test]
     fn build_resume_cmd_default_mode_without_zdotdir() {
-        let cmd = build_resume_cmd("/tmp/my-project", "abc-123", false, None, None);
+        let cmd = build_resume_cmd("/tmp/my-project", "abc-123", false, None, None, 1);
         assert!(cmd.contains("CLAUHIST_SHELL=1 exec zsh -i"));
         assert!(!cmd.contains("ZDOTDIR"));
         assert!(cmd.contains("go back."));
@@ -624,26 +643,26 @@ not json
 
     #[test]
     fn build_resume_cmd_quotes_project_path_with_special_chars() {
-        let cmd = build_resume_cmd("/tmp/it's here", "sess-1", true, None, None);
+        let cmd = build_resume_cmd("/tmp/it's here", "sess-1", true, None, None, 0);
         assert_eq!(cmd, "cd '/tmp/it'\\''s here' && claude --resume sess-1");
 
-        let cmd = build_resume_cmd("/tmp/it's here", "sess-1", false, None, None);
+        let cmd = build_resume_cmd("/tmp/it's here", "sess-1", false, None, None, 1);
         assert!(cmd.starts_with("cd '/tmp/it'\\''s here' && claude --resume sess-1;"));
     }
 
     #[test]
-    fn setup_clauhist_zdotdir_creates_zshrc_with_prompt_indicator() {
-        let dir = setup_clauhist_zdotdir();
-        let zshrc_path = dir.join(".zshrc");
-        assert!(zshrc_path.exists());
-
-        let content = std::fs::read_to_string(&zshrc_path).unwrap();
-        assert!(content.contains("source \"$ZDOTDIR/.zshrc\""));
+    fn setup_clauhist_zdotdir_depth_1_shows_clauhist() {
+        let dir = setup_clauhist_zdotdir(1);
+        let content = std::fs::read_to_string(dir.join(".zshrc")).unwrap();
         assert!(content.contains("[clauhist]"));
-        assert!(content.contains("%F{cyan}"));
-        assert!(content.contains("trap"));
+        assert!(!content.contains("[clauhist("));
+    }
 
-        let _ = std::fs::remove_dir_all(&dir);
+    #[test]
+    fn setup_clauhist_zdotdir_depth_2_shows_clauhist_with_number() {
+        let dir = setup_clauhist_zdotdir(2);
+        let content = std::fs::read_to_string(dir.join(".zshrc")).unwrap();
+        assert!(content.contains("[clauhist(2)]"));
     }
 
     #[test]
