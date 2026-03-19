@@ -239,7 +239,7 @@ fn build_resume_cmd(project: &str, session_id: &str, print_mode: bool, zdotdir: 
 }
 
 fn setup_clauhist_zdotdir(depth: u32) -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    let home = std::env::var("HOME").expect("HOME environment variable must be set");
     let dir = PathBuf::from(home).join(".cache").join("clauhist").join(format!("zdotdir-{depth}"));
     let _ = std::fs::create_dir_all(&dir);
 
@@ -508,25 +508,33 @@ mod tests {
         }
     }
 
+    fn home_path(relative: &str) -> String {
+        let home = std::env::var("HOME").unwrap();
+        format!("{home}/{relative}")
+    }
+
     fn unique_temp_path(label: &str) -> PathBuf {
         let suffix = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        std::env::temp_dir().join(format!("clauhist-{label}-{suffix}"))
+        let home = std::env::var("HOME").unwrap();
+        PathBuf::from(home).join("tmp").join(format!("clauhist-{label}-{suffix}"))
     }
 
     #[test]
     fn parse_sessions_skips_blank_invalid_and_missing_session_ids() {
-        let raw = r#"
-{"sessionId":"alpha","display":"first","timestamp":10,"project":"/tmp/a"}
-not json
-{"sessionId":"","display":"ignored","timestamp":20,"project":"/tmp/a"}
+        let p = home_path("projects/a");
+        let raw = format!(
+            "\n\
+             {{\"sessionId\":\"alpha\",\"display\":\"first\",\"timestamp\":10,\"project\":\"{p}\"}}\n\
+             not json\n\
+             {{\"sessionId\":\"\",\"display\":\"ignored\",\"timestamp\":20,\"project\":\"{p}\"}}\n\
+             \n\
+             {{\"sessionId\":\"alpha\",\"display\":\"second\",\"timestamp\":30,\"project\":\"{p}\"}}\n"
+        );
 
-{"sessionId":"alpha","display":"second","timestamp":30,"project":"/tmp/a"}
-"#;
-
-        let sessions = parse_sessions(raw);
+        let sessions = parse_sessions(&raw);
 
         assert_eq!(sessions.len(), 1);
         let alpha = sessions.get("alpha").unwrap();
@@ -537,13 +545,15 @@ not json
 
     #[test]
     fn build_sessions_sorts_entries_filters_empty_messages_and_orders_by_recent_activity() {
+        let older_proj = home_path("projects/older");
+        let newer_proj = home_path("projects/newer");
         let mut raw = HashMap::new();
         raw.insert(
             "older".to_string(),
             vec![
-                history_entry("older", Some("later"), Some(30), Some("/tmp/older")),
-                history_entry("older", Some(""), Some(20), Some("/tmp/older")),
-                history_entry("older", Some("first"), Some(10), Some("/tmp/older")),
+                history_entry("older", Some("later"), Some(30), Some(&older_proj)),
+                history_entry("older", Some(""), Some(20), Some(&older_proj)),
+                history_entry("older", Some("first"), Some(10), Some(&older_proj)),
             ],
         );
         raw.insert(
@@ -552,7 +562,7 @@ not json
                 "newer",
                 Some("recent"),
                 Some(100),
-                Some("/tmp/newer"),
+                Some(&newer_proj),
             )],
         );
 
@@ -563,7 +573,7 @@ not json
         assert_eq!(sessions[0].last_ts, 100);
 
         let older = &sessions[1];
-        assert_eq!(older.project, "/tmp/older");
+        assert_eq!(older.project, older_proj);
         assert_eq!(older.first_ts, 10);
         assert_eq!(older.last_ts, 30);
         assert_eq!(older.messages.len(), 2);
@@ -579,7 +589,9 @@ not json
 
     #[test]
     fn shell_quote_escapes_single_quotes() {
-        assert_eq!(shell_quote("/tmp/it's here"), "'/tmp/it'\\''s here'");
+        let p = home_path("projects/it's here");
+        let expected = format!("'{}'", p.replace("'", "'\\''"));
+        assert_eq!(shell_quote(&p), expected);
     }
 
     #[test]
@@ -608,8 +620,9 @@ not json
 
     #[test]
     fn build_resume_cmd_print_mode_generates_simple_cd_and_resume() {
-        let cmd = build_resume_cmd("/tmp/my-project", "abc-123", true, None, None, 0);
-        assert_eq!(cmd, "cd '/tmp/my-project' && claude --resume abc-123");
+        let p = home_path("projects/my-project");
+        let cmd = build_resume_cmd(&p, "abc-123", true, None, None, 0);
+        assert_eq!(cmd, format!("cd '{}' && claude --resume abc-123", p));
         assert!(!cmd.contains("CLAUHIST_SHELL"));
         assert!(!cmd.contains("exec zsh"));
         assert!(!cmd.contains("ZDOTDIR"));
@@ -617,25 +630,30 @@ not json
 
     #[test]
     fn build_resume_cmd_default_mode_includes_subshell_and_env_var() {
-        let cmd = build_resume_cmd("/tmp/my-project", "abc-123", false, Some("/tmp/zd"), Some("/home/user"), 1);
-        assert!(cmd.starts_with("cd '/tmp/my-project' && claude --resume abc-123;"));
+        let p = home_path("projects/my-project");
+        let zd = home_path("projects/zd");
+        let home = std::env::var("HOME").unwrap();
+        let cmd = build_resume_cmd(&p, "abc-123", false, Some(&zd), Some(&home), 1);
+        assert!(cmd.starts_with(&format!("cd '{p}' && claude --resume abc-123;")));
         assert!(cmd.contains("CLAUHIST_SHELL=1"));
-        assert!(cmd.contains("ZDOTDIR='/tmp/zd'"));
-        assert!(cmd.contains("CLAUHIST_PREV_DIR='/home/user'"));
-        assert!(cmd.contains("go back to /home/user"));
+        assert!(cmd.contains(&format!("ZDOTDIR='{zd}'")));
+        assert!(cmd.contains(&format!("CLAUHIST_PREV_DIR='{home}'")));
+        assert!(cmd.contains(&format!("go back to {home}")));
         assert!(cmd.contains("exec zsh -i"));
         assert!(cmd.contains("clauhist --return"));
     }
 
     #[test]
     fn build_resume_cmd_nested_depth_is_reflected() {
-        let cmd = build_resume_cmd("/tmp/p", "s1", false, None, None, 3);
+        let p = home_path("projects/p");
+        let cmd = build_resume_cmd(&p, "s1", false, None, None, 3);
         assert!(cmd.contains("CLAUHIST_SHELL=3"));
     }
 
     #[test]
     fn build_resume_cmd_default_mode_without_zdotdir() {
-        let cmd = build_resume_cmd("/tmp/my-project", "abc-123", false, None, None, 1);
+        let p = home_path("projects/my-project");
+        let cmd = build_resume_cmd(&p, "abc-123", false, None, None, 1);
         assert!(cmd.contains("CLAUHIST_SHELL=1 exec zsh -i"));
         assert!(!cmd.contains("ZDOTDIR"));
         assert!(cmd.contains("go back."));
@@ -643,11 +661,13 @@ not json
 
     #[test]
     fn build_resume_cmd_quotes_project_path_with_special_chars() {
-        let cmd = build_resume_cmd("/tmp/it's here", "sess-1", true, None, None, 0);
-        assert_eq!(cmd, "cd '/tmp/it'\\''s here' && claude --resume sess-1");
+        let p = home_path("projects/it's here");
+        let quoted = shell_quote(&p);
+        let cmd = build_resume_cmd(&p, "sess-1", true, None, None, 0);
+        assert_eq!(cmd, format!("cd {quoted} && claude --resume sess-1"));
 
-        let cmd = build_resume_cmd("/tmp/it's here", "sess-1", false, None, None, 1);
-        assert!(cmd.starts_with("cd '/tmp/it'\\''s here' && claude --resume sess-1;"));
+        let cmd = build_resume_cmd(&p, "sess-1", false, None, None, 1);
+        assert!(cmd.starts_with(&format!("cd {quoted} && claude --resume sess-1;")));
     }
 
     #[test]
@@ -712,16 +732,17 @@ not json
 
     #[test]
     fn render_preview_formats_metadata_and_message_lines() {
+        let p = home_path("projects/example");
         let invalid_ms = i64::MAX as u64;
         let preview = render_preview(&Session {
             session_id: "session-1".to_string(),
-            project: "/tmp/example".to_string(),
+            project: p.clone(),
             first_ts: invalid_ms,
             last_ts: invalid_ms,
             messages: vec![(invalid_ms, "line one\nline two".to_string())],
         });
 
-        assert!(preview.contains("Project : /tmp/example"));
+        assert!(preview.contains(&format!("Project : {p}")));
         assert!(preview.contains("Session : session-1"));
         assert!(preview.contains("Started : unknown"));
         assert!(preview.contains("Last    : unknown"));
