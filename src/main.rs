@@ -368,7 +368,7 @@ fn cmd_browse(sessions: Vec<Session>, print_mode: bool, exe_path: &str) {
         "--delimiter=\t".to_string(),
         "--with-nth=2,3,4,5".to_string(),
         format!("--preview={}", preview_cmd),
-        "--preview-window=down:40%:wrap".to_string(),
+        "--preview-window=down:50%:wrap".to_string(),
         "--height=85%".to_string(),
         "--border=rounded".to_string(),
         "--header=Claude Code History Browser  [Enter: resume  Ctrl-/: toggle preview  Ctrl-C: cancel]"
