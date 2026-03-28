@@ -1,6 +1,6 @@
 # clauhist
 
-Browse and resume Claude Code chat sessions interactively.
+Browse your Claude Code history and resume sessions with ease.
 
 ```
 ╭───────────────────────────────────────────────────────────────────────────────────────╮

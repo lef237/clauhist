@@ -28,7 +28,7 @@ struct Session {
 #[derive(Parser)]
 #[command(
     name = "clauhist",
-    about = "Browse and resume Claude Code chat sessions"
+    about = "Browse your Claude Code history and resume sessions with ease"
 )]
 struct Cli {
     #[command(subcommand)]
