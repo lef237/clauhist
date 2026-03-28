@@ -3,14 +3,14 @@
 Browse and resume Claude Code chat sessions interactively.
 
 ```
-╭─────────────────────────────────────────────────────────────────────────────────╮
-│ Claude Code History Browser  [Enter: resume  Ctrl-/: toggle preview  Ctrl-C: cancel] │
-├─────────────────────────────────────────────────────────────────────────────────┤
-│ Search:                                                                         │
+╭───────────────────────────────────────────────────────────────────────────────────────╮
+│ Claude Code History Browser  [Enter: resume  Ctrl-/: toggle preview  Ctrl-C: cancel]  │
+├───────────────────────────────────────────────────────────────────────────────────────┤
+│ Search:                                                                               │
 │ > 2026-03-18 09:12  ✓ ~/projects/myapp      Tell me about Rust error handling…  (12) │
 │   2026-03-17 22:45  ✓ ~/sandbox/api-client  Generate client from OpenAPI schema  (8) │
 │   2026-03-17 14:30  ✗ ~/old-project         Database migration steps             (3) │
-╰─────────────────────────────────────────────────────────────────────────────────╯
+╰───────────────────────────────────────────────────────────────────────────────────────╯
 ```
 *(Example output — actual appearance depends on your terminal and fzf version)*
 
@@ -20,11 +20,11 @@ Select a session and press `Enter` — clauhist opens `claude --resume` in the p
 
 ## Requirements
 
-| Dependency | Required | Install |
-|------------|----------|---------|
-| [Rust](https://rustup.rs/) | Build only | `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh` |
-| [fzf](https://github.com/junegunn/fzf) | **Runtime** | `brew install fzf` |
-| [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | **Runtime** | `npm install -g @anthropic-ai/claude-code` |
+| Dependency | Required |
+|------------|----------|
+| [Rust](https://rustup.rs/) | Build only |
+| [fzf](https://github.com/junegunn/fzf) | **Runtime** |
+| [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | **Runtime** |
 
 > **Note:** fzf provides the interactive UI — clauhist will not work without it.
 
@@ -33,17 +33,20 @@ Select a session and press `Enter` — clauhist opens `claude --resume` in the p
 ## Installation
 
 ```sh
-git clone <repo-url>
+cargo install clauhist
+```
+
+Or build from source:
+
+```sh
+git clone https://github.com/lef237/clauhist.git
 cd clauhist
 cargo install --path .
 ```
 
-This installs the `clauhist` binary to `~/.cargo/bin/`. Make sure that directory is in your `PATH`:
+Make sure `~/.cargo/bin` is in your `PATH`:
 
 ```sh
-# Verify
-clauhist --version
-
 # If ~/.cargo/bin is not in your PATH, add this to ~/.zshrc or ~/.bashrc:
 export PATH="$HOME/.cargo/bin:$PATH"
 ```
