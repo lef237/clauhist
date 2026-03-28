@@ -110,3 +110,13 @@ Install fzf: `brew install fzf` (macOS) or see the [fzf installation guide](http
 
 **Sessions marked with `✗`**
 The project directory has been deleted or moved. The session can still be resumed, but the `cd` step will fail. Claude will open in the directory where you ran `clauhist`.
+
+---
+
+## Information
+
+clauhist is a local-only tool that works entirely on your machine.
+
+- **What it reads:** `~/.claude/history.jsonl` — a local file that Claude Code stores on your machine. This file contains session metadata (session IDs, timestamps, project paths, and the first line of each user message).
+- **What it does NOT do:** clauhist does not access Anthropic's API or servers, and does not transmit any data externally.
+- **How it resumes sessions:** clauhist invokes `claude --resume <session-id>`, which is an [officially documented CLI command](https://docs.anthropic.com/en/docs/claude-code/cli-reference).
