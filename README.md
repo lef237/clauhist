@@ -1,6 +1,6 @@
 # clauhist
 
-Browse your Claude Code history and resume sessions with ease.
+Browse Claude Code history across working directories and resume sessions.
 
 ```
 ╭───────────────────────────────────────────────────────────────────────────────────────╮
@@ -14,7 +14,19 @@ Browse your Claude Code history and resume sessions with ease.
 ```
 *(Example output — actual appearance depends on your terminal and fzf version)*
 
+Claude Code can already resume work from the current project directory. clauhist solves a different problem: browsing the full history across all of your working directories from one place.
+
 Select a session and press `Enter` — clauhist opens `claude --resume` in the project directory. When you exit Claude, you return to your original shell.
+
+---
+
+## Why clauhist exists
+
+If you `cd` into a project and use Claude Code's `/resume` there, you can inspect and reopen work for that directory.
+
+The limitation is that this is tied to the directory you are currently in. If you want to look back across many repositories or old working directories, you have to move around and check them one by one.
+
+clauhist reads `~/.claude/history.jsonl`, shows sessions from all working directories in one `fzf` list, and lets you reopen the one you want immediately.
 
 ---
 
@@ -61,7 +73,7 @@ export PATH="$HOME/.cargo/bin:$PATH"
 clauhist
 ```
 
-The fzf browser opens with your Claude Code sessions sorted by most recent activity. Select a session and press `Enter` to resume it.
+The fzf browser opens with your Claude Code sessions sorted by most recent activity, across all working directories found in your history. Select a session and press `Enter` to resume it.
 
 ### Key bindings
 

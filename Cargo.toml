@@ -1,8 +1,8 @@
 [package]
 name = "clauhist"
-version = "1.0.1"
+version = "1.0.2"
 edition = "2021"
-description = "Browse your Claude Code history and resume sessions with ease"
+description = "Browse Claude Code history across working directories and resume sessions"
 license = "MIT"
 repository = "https://github.com/lef237/clauhist"
 
