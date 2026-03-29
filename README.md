@@ -101,7 +101,9 @@ The preview pane (toggle with `Ctrl-/`) shows the project path, timestamps, and 
 
 ## Shell integration (recommended)
 
-By default, clauhist runs `cd` in a subshell, so your shell stays in the original directory after Claude exits. To stay in the project directory and enable `cd -` to go back, add shell integration:
+By default, clauhist runs `cd` in a subshell. Therefore, you need to `exit` to return to the original directory.
+
+To stay in the current shell and enable `cd -` to go back, add shell integration:
 
 ```sh
 # ~/.zshrc or ~/.bashrc
