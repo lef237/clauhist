@@ -46,7 +46,7 @@ enum Commands {
     Preview { session_id: String },
     /// Print shell integration code for your shell
     Init {
-        /// Shell name (zsh, bash, fish)
+        /// Shell name (zsh, bash, fish, nu)
         shell: String,
     },
 }
@@ -213,29 +213,25 @@ fn render_preview(session: &Session) -> String {
     output
 }
 
-fn build_resume_cmd(project: &str, session_id: &str, print_mode: bool, zdotdir: Option<&str>, prev_dir: Option<&str>, depth: u32) -> String {
+fn build_resume_cmd(project: &str, session_id: &str, zdotdir: Option<&str>, prev_dir: Option<&str>, depth: u32) -> String {
     let base = format!(
         "cd {} && claude --resume {}",
         shell_quote(project),
         session_id
     );
-    if print_mode {
+    let zdotdir_env = zdotdir
+        .map(|d| format!("ZDOTDIR={} ", shell_quote(d)))
+        .unwrap_or_default();
+    let prev_dir_env = prev_dir
+        .map(|d| format!("CLAUHIST_PREV_DIR={} ", shell_quote(d)))
+        .unwrap_or_default();
+    let back_msg = prev_dir
+        .map(|d| format!("Type exit or clauhist --return to go back to {d}."))
+        .unwrap_or_else(|| "Type exit or clauhist --return to go back.".to_string());
+    format!(
+        "{}; echo ''; echo 'Claude session ended. {back_msg}'; CLAUHIST_SHELL={depth} {prev_dir_env}{zdotdir_env}exec zsh -i",
         base
-    } else {
-        let zdotdir_env = zdotdir
-            .map(|d| format!("ZDOTDIR={} ", shell_quote(d)))
-            .unwrap_or_default();
-        let prev_dir_env = prev_dir
-            .map(|d| format!("CLAUHIST_PREV_DIR={} ", shell_quote(d)))
-            .unwrap_or_default();
-        let back_msg = prev_dir
-            .map(|d| format!("Type exit or clauhist --return to go back to {d}."))
-            .unwrap_or_else(|| "Type exit or clauhist --return to go back.".to_string());
-        format!(
-            "{}; echo ''; echo 'Claude session ended. {back_msg}'; CLAUHIST_SHELL={depth} {prev_dir_env}{zdotdir_env}exec zsh -i",
-            base
-        )
-    }
+    )
 }
 
 fn setup_clauhist_zdotdir(depth: u32) -> PathBuf {
@@ -276,28 +272,43 @@ fn is_clauhist_shell() -> bool {
 
 fn cmd_init(shell: &str) {
     match shell {
-        "zsh" => {
+        "zsh" | "bash" => {
             println!(
-                r#"function clauhist() {{ local cmd=$(command clauhist --print "$@"); [[ -n "$cmd" ]] && eval "$cmd"; }}"#
-            );
-        }
-        "bash" => {
-            println!(
-                r#"function clauhist() {{ local cmd=$(command clauhist --print "$@"); [[ -n "$cmd" ]] && eval "$cmd"; }}"#
+                r#"clauhist() {{
+    local out
+    out=$(command clauhist --print "$@") || return
+    [[ "$out" != *$'\n'* ]] && return
+    local project="${{out%%$'\n'*}}"
+    local sid="${{out##*$'\n'}}"
+    cd -- "$project" && claude --resume "$sid"
+}}"#
             );
         }
         "fish" => {
             println!(
                 r#"function clauhist
-    set -l cmd (command clauhist --print $argv)
-    if test -n "$cmd"
-        eval $cmd
+    set -l out (command clauhist --print $argv)
+    if test (count $out) -ne 2
+        return
     end
+    cd $out[1]; and claude --resume $out[2]
 end"#
             );
         }
+        "nu" => {
+            println!(
+                r#"def --env clauhist [...args: string] {{
+    let result = (^clauhist --print ...$args | complete)
+    if $result.exit_code != 0 {{ return }}
+    let lines = ($result.stdout | str trim | lines)
+    if ($lines | length) != 2 {{ return }}
+    cd ($lines | get 0)
+    ^claude --resume ($lines | get 1)
+}}"#
+            );
+        }
         _ => {
-            eprintln!("Unsupported shell: {}. Supported: zsh, bash, fish", shell);
+            eprintln!("Unsupported shell: {}. Supported: zsh, bash, fish, nu", shell);
             std::process::exit(1);
         }
     }
@@ -425,8 +436,9 @@ fn cmd_browse(sessions: Vec<Session>, print_mode: bool, exe_path: &str) {
     let project = fields[2].trim_start_matches(['✓', '✗', ' ']);
 
     if print_mode {
-        let shell_cmd = build_resume_cmd(project, session_id, true, None, None, 0);
-        println!("{}", shell_cmd);
+        // Two-line contract for shell wrappers: project on line 1, session id on line 2.
+        // Each shell formats its own `cd` + `claude --resume` from these.
+        println!("{}\n{}", project, session_id);
     } else {
         let depth = clauhist_depth() + 1;
         let zdotdir = setup_clauhist_zdotdir(depth);
@@ -436,7 +448,6 @@ fn cmd_browse(sessions: Vec<Session>, print_mode: bool, exe_path: &str) {
         let shell_cmd = build_resume_cmd(
             project,
             session_id,
-            false,
             Some(zdotdir.to_str().unwrap()),
             prev_dir.as_deref(),
             depth,
@@ -619,21 +630,11 @@ mod tests {
     }
 
     #[test]
-    fn build_resume_cmd_print_mode_generates_simple_cd_and_resume() {
-        let p = home_path("projects/my-project");
-        let cmd = build_resume_cmd(&p, "abc-123", true, None, None, 0);
-        assert_eq!(cmd, format!("cd '{}' && claude --resume abc-123", p));
-        assert!(!cmd.contains("CLAUHIST_SHELL"));
-        assert!(!cmd.contains("exec zsh"));
-        assert!(!cmd.contains("ZDOTDIR"));
-    }
-
-    #[test]
-    fn build_resume_cmd_default_mode_includes_subshell_and_env_var() {
+    fn build_resume_cmd_includes_subshell_and_env_var() {
         let p = home_path("projects/my-project");
         let zd = home_path("projects/zd");
         let home = std::env::var("HOME").unwrap();
-        let cmd = build_resume_cmd(&p, "abc-123", false, Some(&zd), Some(&home), 1);
+        let cmd = build_resume_cmd(&p, "abc-123", Some(&zd), Some(&home), 1);
         assert!(cmd.starts_with(&format!("cd '{p}' && claude --resume abc-123;")));
         assert!(cmd.contains("CLAUHIST_SHELL=1"));
         assert!(cmd.contains(&format!("ZDOTDIR='{zd}'")));
@@ -646,14 +647,14 @@ mod tests {
     #[test]
     fn build_resume_cmd_nested_depth_is_reflected() {
         let p = home_path("projects/p");
-        let cmd = build_resume_cmd(&p, "s1", false, None, None, 3);
+        let cmd = build_resume_cmd(&p, "s1", None, None, 3);
         assert!(cmd.contains("CLAUHIST_SHELL=3"));
     }
 
     #[test]
-    fn build_resume_cmd_default_mode_without_zdotdir() {
+    fn build_resume_cmd_without_zdotdir() {
         let p = home_path("projects/my-project");
-        let cmd = build_resume_cmd(&p, "abc-123", false, None, None, 1);
+        let cmd = build_resume_cmd(&p, "abc-123", None, None, 1);
         assert!(cmd.contains("CLAUHIST_SHELL=1 exec zsh -i"));
         assert!(!cmd.contains("ZDOTDIR"));
         assert!(cmd.contains("go back."));
@@ -663,10 +664,7 @@ mod tests {
     fn build_resume_cmd_quotes_project_path_with_special_chars() {
         let p = home_path("projects/it's here");
         let quoted = shell_quote(&p);
-        let cmd = build_resume_cmd(&p, "sess-1", true, None, None, 0);
-        assert_eq!(cmd, format!("cd {quoted} && claude --resume sess-1"));
-
-        let cmd = build_resume_cmd(&p, "sess-1", false, None, None, 1);
+        let cmd = build_resume_cmd(&p, "sess-1", None, None, 1);
         assert!(cmd.starts_with(&format!("cd {quoted} && claude --resume sess-1;")));
     }
 
@@ -685,37 +683,129 @@ mod tests {
         assert!(content.contains("[clauhist(2)]"));
     }
 
-    #[test]
-    fn cmd_init_zsh_output_contains_print_flag() {
+    fn run_init(shell: &str) -> String {
         let output = std::process::Command::new(clauhist_bin().to_str().unwrap())
-            .args(["init", "zsh"])
+            .args(["init", shell])
             .output()
             .unwrap();
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("--print"), "shell integration must pass --print to binary");
-        assert!(stdout.contains("eval"), "shell integration must eval the output");
+        assert!(output.status.success(), "init {shell} should succeed");
+        String::from_utf8(output.stdout).unwrap()
     }
 
     #[test]
-    fn cmd_init_bash_output_contains_print_flag() {
-        let output = std::process::Command::new(clauhist_bin().to_str().unwrap())
-            .args(["init", "bash"])
-            .output()
-            .unwrap();
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("--print"), "shell integration must pass --print to binary");
-        assert!(stdout.contains("eval"), "shell integration must eval the output");
+    fn cmd_init_zsh_wrapper_consumes_two_line_contract() {
+        let stdout = run_init("zsh");
+        assert!(stdout.contains("--print"));
+        assert!(stdout.contains(r#"cd -- "$project""#), "must cd safely with --");
+        assert!(stdout.contains(r#"claude --resume "$sid""#));
+        assert!(stdout.contains(r#"[[ "$out" != *$'\n'* ]] && return"#), "must reject single-line output");
+        assert!(!stdout.contains("eval"), "no more eval; shell formats cd itself");
     }
 
     #[test]
-    fn cmd_init_fish_output_contains_print_flag() {
-        let output = std::process::Command::new(clauhist_bin().to_str().unwrap())
-            .args(["init", "fish"])
+    fn cmd_init_bash_wrapper_consumes_two_line_contract() {
+        let stdout = run_init("bash");
+        assert!(stdout.contains("--print"));
+        assert!(stdout.contains(r#"cd -- "$project""#));
+        assert!(stdout.contains(r#"claude --resume "$sid""#));
+        assert!(stdout.contains(r#"[[ "$out" != *$'\n'* ]] && return"#));
+        assert!(!stdout.contains("eval"));
+    }
+
+    #[test]
+    fn cmd_init_fish_wrapper_consumes_two_line_contract() {
+        let stdout = run_init("fish");
+        assert!(stdout.contains("--print"));
+        // fish's `cd` builtin rejects `--`, so we trust the variable expansion alone.
+        assert!(stdout.contains("cd $out[1]"));
+        assert!(stdout.contains("claude --resume $out[2]"));
+        assert!(stdout.contains("test (count $out) -ne 2"), "must require exactly two lines");
+        assert!(!stdout.contains("eval"));
+    }
+
+    #[test]
+    fn cmd_init_nu_wrapper_consumes_two_line_contract() {
+        let stdout = run_init("nu");
+        assert!(stdout.contains("--print"));
+        assert!(stdout.contains("def --env clauhist"), "must opt into env mutation so cd propagates");
+        assert!(stdout.contains("cd ($lines | get 0)"));
+        assert!(stdout.contains("^claude --resume ($lines | get 1)"));
+        assert!(stdout.contains("($lines | length) != 2"), "must require exactly two lines");
+    }
+
+    fn run_bash_wrapper_with_stub(stub_stdout: &str) -> std::process::Output {
+        // Sources the generated bash wrapper, then calls `clauhist` with PATH overridden
+        // so `command clauhist` resolves to a stub that emits `stub_stdout` and exits 0.
+        // The stub also defines `cd` and `claude` as functions that just echo their args
+        // so we can observe whether the wrapper invoked them and with what.
+        let wrapper = run_init("bash");
+        let stub_dir = unique_temp_path("bash-stub");
+        std::fs::create_dir_all(&stub_dir).unwrap();
+        let stub_path = stub_dir.join("clauhist");
+        let stub = format!(
+            "#!/usr/bin/env bash\nprintf '%s' {}\n",
+            shell_quote(stub_stdout)
+        );
+        std::fs::write(&stub_path, stub).unwrap();
+        std::fs::set_permissions(
+            &stub_path,
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .unwrap();
+
+        let script = format!(
+            "{wrapper}\n\
+             cd() {{ echo CD:\"$@\"; }}\n\
+             claude() {{ echo CLAUDE:\"$@\"; }}\n\
+             clauhist\n",
+        );
+        let mut path = std::env::var("PATH").unwrap_or_default();
+        path = format!("{}:{path}", stub_dir.display());
+
+        let out = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(&script)
+            .env("PATH", &path)
             .output()
             .unwrap();
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        assert!(stdout.contains("--print"), "shell integration must pass --print to binary");
-        assert!(stdout.contains("eval"), "shell integration must eval the output");
+        std::fs::remove_dir_all(stub_dir).unwrap();
+        out
+    }
+
+    #[test]
+    fn bash_wrapper_runs_cd_and_claude_on_two_line_output() {
+let out = run_bash_wrapper_with_stub("/tmp/example\nabc-123\n");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(stdout.contains("CD:-- /tmp/example"), "got: {stdout}");
+        assert!(stdout.contains("CLAUDE:--resume abc-123"), "got: {stdout}");
+    }
+
+    #[test]
+    fn bash_wrapper_rejects_single_line_output() {
+// Single line is the canceled-fzf / malformed case. Wrapper must NOT cd or run claude.
+        let out = run_bash_wrapper_with_stub("only-one-line");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(!stdout.contains("CD:"), "must not cd; got: {stdout}");
+        assert!(!stdout.contains("CLAUDE:"), "must not resume; got: {stdout}");
+    }
+
+    #[test]
+    fn bash_wrapper_rejects_empty_output() {
+let out = run_bash_wrapper_with_stub("");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(!stdout.contains("CD:"));
+        assert!(!stdout.contains("CLAUDE:"));
+    }
+
+    #[test]
+    fn cmd_init_unsupported_shell_lists_nu_as_supported() {
+        let output = std::process::Command::new(clauhist_bin().to_str().unwrap())
+            .args(["init", "tcsh"])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("nu"), "error message must advertise nu as a supported shell");
     }
 
     #[test]
