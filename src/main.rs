@@ -51,12 +51,30 @@ enum Commands {
     },
 }
 
-fn history_file() -> PathBuf {
+/// Explicit config directory override, if the user set one.
+///
+/// Claude Code reads `CLAUDE_CONFIG_DIR` to support multiple accounts on one
+/// machine (for example a personal seat in `~/.claude` and a team seat in
+/// `~/.claude-work`). An empty value is treated as unset.
+fn config_dir_override() -> Option<String> {
+    std::env::var("CLAUDE_CONFIG_DIR")
+        .ok()
+        .filter(|dir| !dir.is_empty())
+}
+
+fn config_dir() -> PathBuf {
+    if let Some(dir) = config_dir_override() {
+        return PathBuf::from(dir);
+    }
     let home = std::env::var("HOME").unwrap_or_else(|_| {
         eprintln!("HOME environment variable not set");
         std::process::exit(1);
     });
-    PathBuf::from(home).join(".claude").join("history.jsonl")
+    PathBuf::from(home).join(".claude")
+}
+
+fn history_file() -> PathBuf {
+    config_dir().join("history.jsonl")
 }
 
 fn parse_sessions(content: &str) -> HashMap<String, Vec<HistoryEntry>> {
@@ -213,10 +231,17 @@ fn render_preview(session: &Session) -> String {
     output
 }
 
-fn build_resume_cmd(project: &str, session_id: &str, print_mode: bool, zdotdir: Option<&str>, prev_dir: Option<&str>, depth: u32) -> String {
+fn build_resume_cmd(project: &str, session_id: &str, print_mode: bool, zdotdir: Option<&str>, prev_dir: Option<&str>, depth: u32, config_dir: Option<&str>) -> String {
+    // `env VAR=value claude` rather than a bare `VAR=value claude` prefix: the
+    // print-mode command is eval'd by the user's shell, and fish does not
+    // support inline assignment prefixes.
+    let claude_cmd = config_dir
+        .map(|d| format!("env CLAUDE_CONFIG_DIR={} claude", shell_quote(d)))
+        .unwrap_or_else(|| "claude".to_string());
     let base = format!(
-        "cd {} && claude --resume {}",
+        "cd {} && {} --resume {}",
         shell_quote(project),
+        claude_cmd,
         session_id
     );
     if print_mode {
@@ -228,11 +253,16 @@ fn build_resume_cmd(project: &str, session_id: &str, print_mode: bool, zdotdir: 
         let prev_dir_env = prev_dir
             .map(|d| format!("CLAUHIST_PREV_DIR={} ", shell_quote(d)))
             .unwrap_or_default();
+        // Keep the sub-shell on the same account, so a plain `claude` there
+        // resolves to the config directory the session was resumed from.
+        let config_dir_env = config_dir
+            .map(|d| format!("CLAUDE_CONFIG_DIR={} ", shell_quote(d)))
+            .unwrap_or_default();
         let back_msg = prev_dir
             .map(|d| format!("Type exit or clauhist --return to go back to {d}."))
             .unwrap_or_else(|| "Type exit or clauhist --return to go back.".to_string());
         format!(
-            "{}; echo ''; echo 'Claude session ended. {back_msg}'; CLAUHIST_SHELL={depth} {prev_dir_env}{zdotdir_env}exec zsh -i",
+            "{}; echo ''; echo 'Claude session ended. {back_msg}'; CLAUHIST_SHELL={depth} {prev_dir_env}{zdotdir_env}{config_dir_env}exec zsh -i",
             base
         )
     }
@@ -424,8 +454,18 @@ fn cmd_browse(sessions: Vec<Session>, print_mode: bool, exe_path: &str) {
     let session_id = fields[0];
     let project = fields[2].trim_start_matches(['✓', '✗', ' ']);
 
+    let config_dir = config_dir_override();
+
     if print_mode {
-        let shell_cmd = build_resume_cmd(project, session_id, true, None, None, 0);
+        let shell_cmd = build_resume_cmd(
+            project,
+            session_id,
+            true,
+            None,
+            None,
+            0,
+            config_dir.as_deref(),
+        );
         println!("{}", shell_cmd);
     } else {
         let depth = clauhist_depth() + 1;
@@ -440,6 +480,7 @@ fn cmd_browse(sessions: Vec<Session>, print_mode: bool, exe_path: &str) {
             Some(zdotdir.to_str().unwrap()),
             prev_dir.as_deref(),
             depth,
+            config_dir.as_deref(),
         );
         let _ = Command::new("zsh").arg("-c").arg(&shell_cmd).status();
     }
@@ -621,11 +662,12 @@ mod tests {
     #[test]
     fn build_resume_cmd_print_mode_generates_simple_cd_and_resume() {
         let p = home_path("projects/my-project");
-        let cmd = build_resume_cmd(&p, "abc-123", true, None, None, 0);
+        let cmd = build_resume_cmd(&p, "abc-123", true, None, None, 0, None);
         assert_eq!(cmd, format!("cd '{}' && claude --resume abc-123", p));
         assert!(!cmd.contains("CLAUHIST_SHELL"));
         assert!(!cmd.contains("exec zsh"));
         assert!(!cmd.contains("ZDOTDIR"));
+        assert!(!cmd.contains("CLAUDE_CONFIG_DIR"));
     }
 
     #[test]
@@ -633,7 +675,7 @@ mod tests {
         let p = home_path("projects/my-project");
         let zd = home_path("projects/zd");
         let home = std::env::var("HOME").unwrap();
-        let cmd = build_resume_cmd(&p, "abc-123", false, Some(&zd), Some(&home), 1);
+        let cmd = build_resume_cmd(&p, "abc-123", false, Some(&zd), Some(&home), 1, None);
         assert!(cmd.starts_with(&format!("cd '{p}' && claude --resume abc-123;")));
         assert!(cmd.contains("CLAUHIST_SHELL=1"));
         assert!(cmd.contains(&format!("ZDOTDIR='{zd}'")));
@@ -646,14 +688,14 @@ mod tests {
     #[test]
     fn build_resume_cmd_nested_depth_is_reflected() {
         let p = home_path("projects/p");
-        let cmd = build_resume_cmd(&p, "s1", false, None, None, 3);
+        let cmd = build_resume_cmd(&p, "s1", false, None, None, 3, None);
         assert!(cmd.contains("CLAUHIST_SHELL=3"));
     }
 
     #[test]
     fn build_resume_cmd_default_mode_without_zdotdir() {
         let p = home_path("projects/my-project");
-        let cmd = build_resume_cmd(&p, "abc-123", false, None, None, 1);
+        let cmd = build_resume_cmd(&p, "abc-123", false, None, None, 1, None);
         assert!(cmd.contains("CLAUHIST_SHELL=1 exec zsh -i"));
         assert!(!cmd.contains("ZDOTDIR"));
         assert!(cmd.contains("go back."));
@@ -663,11 +705,84 @@ mod tests {
     fn build_resume_cmd_quotes_project_path_with_special_chars() {
         let p = home_path("projects/it's here");
         let quoted = shell_quote(&p);
-        let cmd = build_resume_cmd(&p, "sess-1", true, None, None, 0);
+        let cmd = build_resume_cmd(&p, "sess-1", true, None, None, 0, None);
         assert_eq!(cmd, format!("cd {quoted} && claude --resume sess-1"));
 
-        let cmd = build_resume_cmd(&p, "sess-1", false, None, None, 1);
+        let cmd = build_resume_cmd(&p, "sess-1", false, None, None, 1, None);
         assert!(cmd.starts_with(&format!("cd {quoted} && claude --resume sess-1;")));
+    }
+
+    #[test]
+    fn build_resume_cmd_print_mode_carries_config_dir() {
+        let p = home_path("projects/my-project");
+        let cfg = home_path(".claude-work");
+        let cmd = build_resume_cmd(&p, "abc-123", true, None, None, 0, Some(&cfg));
+        assert_eq!(
+            cmd,
+            format!("cd '{p}' && env CLAUDE_CONFIG_DIR='{cfg}' claude --resume abc-123")
+        );
+    }
+
+    #[test]
+    fn build_resume_cmd_default_mode_carries_config_dir_into_subshell() {
+        let p = home_path("projects/my-project");
+        let cfg = home_path(".claude-work");
+        let cmd = build_resume_cmd(&p, "abc-123", false, None, None, 1, Some(&cfg));
+        assert!(cmd.starts_with(&format!(
+            "cd '{p}' && env CLAUDE_CONFIG_DIR='{cfg}' claude --resume abc-123;"
+        )));
+        assert!(cmd.contains(&format!("CLAUDE_CONFIG_DIR='{cfg}' exec zsh -i")));
+    }
+
+    #[test]
+    fn build_resume_cmd_quotes_config_dir_with_special_chars() {
+        let p = home_path("projects/p");
+        let cfg = home_path("it's/.claude-work");
+        let quoted = shell_quote(&cfg);
+        let cmd = build_resume_cmd(&p, "sess-1", true, None, None, 0, Some(&cfg));
+        assert!(cmd.contains(&format!("env CLAUDE_CONFIG_DIR={quoted} claude")));
+    }
+
+    #[test]
+    fn config_dir_falls_back_to_home_claude_when_env_is_unset_or_empty() {
+        let output = std::process::Command::new(clauhist_bin().to_str().unwrap())
+            .arg("--print")
+            .env_remove("CLAUDE_CONFIG_DIR")
+            .env("HOME", "/nonexistent-clauhist-home")
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("/nonexistent-clauhist-home/.claude/history.jsonl"),
+            "expected default path in stderr, got: {stderr}"
+        );
+
+        let output = std::process::Command::new(clauhist_bin().to_str().unwrap())
+            .arg("--print")
+            .env("CLAUDE_CONFIG_DIR", "")
+            .env("HOME", "/nonexistent-clauhist-home")
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("/nonexistent-clauhist-home/.claude/history.jsonl"),
+            "empty CLAUDE_CONFIG_DIR must be treated as unset, got: {stderr}"
+        );
+    }
+
+    #[test]
+    fn config_dir_env_overrides_history_location() {
+        let output = std::process::Command::new(clauhist_bin().to_str().unwrap())
+            .arg("--print")
+            .env("CLAUDE_CONFIG_DIR", "/nonexistent-clauhist-config")
+            .env("HOME", "/nonexistent-clauhist-home")
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("/nonexistent-clauhist-config/history.jsonl"),
+            "expected overridden path in stderr, got: {stderr}"
+        );
     }
 
     #[test]
