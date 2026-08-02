@@ -102,7 +102,7 @@ The preview pane (toggle with `Ctrl-O`) shows the project path, timestamps, and 
 
 ## Shell integration (recommended)
 
-By default, clauhist runs `cd` in a subshell. Therefore, you need to `exit` to return to the original directory.
+By default, clauhist resumes the session in a sub-shell running your `$SHELL` (falling back to zsh). Therefore, you need to `exit` — or run `clauhist --return` — to get back to the original directory.
 
 To stay in the current shell and enable `cd -` to go back, add shell integration:
 
@@ -130,7 +130,7 @@ Install fzf: `brew install fzf` (macOS) or see the [fzf installation guide](http
 fzf treats `Ctrl-/` as an alias for `Ctrl-_` (ASCII `0x1F`), and some terminals — WezTerm, for example — never emit that byte. Use `Ctrl-O` instead; it is a plain ASCII control character and works in every terminal.
 
 **Sessions marked with `✗`**
-The project directory has been deleted or moved. The session can still be resumed, but the `cd` step will fail. Claude will open in the directory where you ran `clauhist`.
+The project directory has been deleted or moved. clauhist resumes a session by `cd`-ing into its project directory first, so these sessions cannot be resumed — selecting one reports the missing directory and exits. Restore or recreate the directory at its original path to resume the session.
 
 ---
 

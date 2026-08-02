@@ -28,6 +28,7 @@ struct Session {
 #[derive(Parser)]
 #[command(
     name = "clauhist",
+    version,
     about = "Browse Claude Code history across working directories and resume sessions"
 )]
 struct Cli {
@@ -213,11 +214,11 @@ fn render_preview(session: &Session) -> String {
     output
 }
 
-fn build_resume_cmd(project: &str, session_id: &str, print_mode: bool, zdotdir: Option<&str>, prev_dir: Option<&str>, depth: u32) -> String {
+fn build_resume_cmd(project: &str, session_id: &str, print_mode: bool, shell: &str, zdotdir: Option<&str>, prev_dir: Option<&str>, depth: u32) -> String {
     let base = format!(
         "cd {} && claude --resume {}",
         shell_quote(project),
-        session_id
+        shell_quote(session_id)
     );
     if print_mode {
         base
@@ -231,11 +232,29 @@ fn build_resume_cmd(project: &str, session_id: &str, print_mode: bool, zdotdir: 
         let back_msg = prev_dir
             .map(|d| format!("Type exit or clauhist --return to go back to {d}."))
             .unwrap_or_else(|| "Type exit or clauhist --return to go back.".to_string());
+        let ended_msg = shell_quote(&format!("Claude session ended. {back_msg}"));
         format!(
-            "{}; echo ''; echo 'Claude session ended. {back_msg}'; CLAUHIST_SHELL={depth} {prev_dir_env}{zdotdir_env}exec zsh -i",
-            base
+            "{}; echo ''; echo {ended_msg}; CLAUHIST_SHELL={depth} {prev_dir_env}{zdotdir_env}exec {} -i",
+            base,
+            shell_quote(shell)
         )
     }
+}
+
+/// Interactive shell to hand back to after Claude exits. The generated command
+/// is run through `sh`, so any shell works as the exec target.
+fn resume_shell() -> String {
+    std::env::var("SHELL")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "zsh".to_string())
+}
+
+fn shell_is_zsh(shell: &str) -> bool {
+    std::path::Path::new(shell)
+        .file_name()
+        .map(|n| n == "zsh")
+        .unwrap_or(false)
 }
 
 fn setup_clauhist_zdotdir(depth: u32) -> PathBuf {
@@ -252,6 +271,17 @@ fn setup_clauhist_zdotdir(depth: u32) -> PathBuf {
         "[clauhist]".to_string()
     };
 
+    // zsh reads $ZDOTDIR/.zshenv before $ZDOTDIR/.zshrc, so the temporary ZDOTDIR
+    // has to forward .zshenv as well — otherwise PATH and anything else set there
+    // is missing from the sub-shell. ZDOTDIR is pointed back here afterwards so the
+    // .zshrc below is still the one zsh picks up.
+    let zshenv = format!(
+        "[[ -f {orig}/.zshenv ]] && source {orig}/.zshenv\n\
+         ZDOTDIR={here}\n",
+        orig = shell_quote(&orig_zdotdir),
+        here = shell_quote(&dir.to_string_lossy()),
+    );
+
     let zshrc = format!(
         "ZDOTDIR={orig}\n\
          [[ -f \"$ZDOTDIR/.zshrc\" ]] && source \"$ZDOTDIR/.zshrc\"\n\
@@ -259,6 +289,7 @@ fn setup_clauhist_zdotdir(depth: u32) -> PathBuf {
         orig = shell_quote(&orig_zdotdir),
     );
 
+    let _ = std::fs::write(dir.join(".zshenv"), zshenv);
     let _ = std::fs::write(dir.join(".zshrc"), zshrc);
     dir
 }
@@ -428,12 +459,26 @@ fn cmd_browse(sessions: Vec<Session>, print_mode: bool, exe_path: &str) {
     let session_id = fields[0];
     let project = fields[2].trim_start_matches(['✓', '✗', ' ']);
 
+    // The resume command is `cd <project> && claude --resume <id>`, so a missing
+    // directory means claude never starts. Say so instead of failing silently.
+    if !std::path::Path::new(project).exists() {
+        eprintln!("Project directory no longer exists: {}", project);
+        eprintln!("Sessions marked ✗ cannot be resumed.");
+        std::process::exit(1);
+    }
+
     if print_mode {
-        let shell_cmd = build_resume_cmd(project, session_id, true, None, None, 0);
+        let shell_cmd = build_resume_cmd(project, session_id, true, "", None, None, 0);
         println!("{}", shell_cmd);
     } else {
         let depth = clauhist_depth() + 1;
-        let zdotdir = setup_clauhist_zdotdir(depth);
+        let shell = resume_shell();
+        // The prompt indicator is a zsh-only trick; other shells get a plain sub-shell.
+        let zdotdir = if shell_is_zsh(&shell) {
+            Some(setup_clauhist_zdotdir(depth).to_string_lossy().into_owned())
+        } else {
+            None
+        };
         let prev_dir = std::env::current_dir()
             .map(|p| p.to_string_lossy().into_owned())
             .ok();
@@ -441,11 +486,15 @@ fn cmd_browse(sessions: Vec<Session>, print_mode: bool, exe_path: &str) {
             project,
             session_id,
             false,
-            Some(zdotdir.to_str().unwrap()),
+            &shell,
+            zdotdir.as_deref(),
             prev_dir.as_deref(),
             depth,
         );
-        let _ = Command::new("zsh").arg("-c").arg(&shell_cmd).status();
+        if let Err(e) = Command::new("sh").arg("-c").arg(&shell_cmd).status() {
+            eprintln!("Failed to start shell: {}", e);
+            std::process::exit(1);
+        }
     }
 }
 
@@ -625,10 +674,10 @@ mod tests {
     #[test]
     fn build_resume_cmd_print_mode_generates_simple_cd_and_resume() {
         let p = home_path("projects/my-project");
-        let cmd = build_resume_cmd(&p, "abc-123", true, None, None, 0);
-        assert_eq!(cmd, format!("cd '{}' && claude --resume abc-123", p));
+        let cmd = build_resume_cmd(&p, "abc-123", true, "zsh", None, None, 0);
+        assert_eq!(cmd, format!("cd '{}' && claude --resume 'abc-123'", p));
         assert!(!cmd.contains("CLAUHIST_SHELL"));
-        assert!(!cmd.contains("exec zsh"));
+        assert!(!cmd.contains("exec"));
         assert!(!cmd.contains("ZDOTDIR"));
     }
 
@@ -637,41 +686,77 @@ mod tests {
         let p = home_path("projects/my-project");
         let zd = home_path("projects/zd");
         let home = std::env::var("HOME").unwrap();
-        let cmd = build_resume_cmd(&p, "abc-123", false, Some(&zd), Some(&home), 1);
-        assert!(cmd.starts_with(&format!("cd '{p}' && claude --resume abc-123;")));
+        let cmd = build_resume_cmd(&p, "abc-123", false, "/bin/zsh", Some(&zd), Some(&home), 1);
+        assert!(cmd.starts_with(&format!("cd '{p}' && claude --resume 'abc-123';")));
         assert!(cmd.contains("CLAUHIST_SHELL=1"));
         assert!(cmd.contains(&format!("ZDOTDIR='{zd}'")));
         assert!(cmd.contains(&format!("CLAUHIST_PREV_DIR='{home}'")));
         assert!(cmd.contains(&format!("go back to {home}")));
-        assert!(cmd.contains("exec zsh -i"));
+        assert!(cmd.contains("exec '/bin/zsh' -i"));
         assert!(cmd.contains("clauhist --return"));
     }
 
     #[test]
     fn build_resume_cmd_nested_depth_is_reflected() {
         let p = home_path("projects/p");
-        let cmd = build_resume_cmd(&p, "s1", false, None, None, 3);
+        let cmd = build_resume_cmd(&p, "s1", false, "zsh", None, None, 3);
         assert!(cmd.contains("CLAUHIST_SHELL=3"));
     }
 
     #[test]
     fn build_resume_cmd_default_mode_without_zdotdir() {
         let p = home_path("projects/my-project");
-        let cmd = build_resume_cmd(&p, "abc-123", false, None, None, 1);
-        assert!(cmd.contains("CLAUHIST_SHELL=1 exec zsh -i"));
+        let cmd = build_resume_cmd(&p, "abc-123", false, "zsh", None, None, 1);
+        assert!(cmd.contains("CLAUHIST_SHELL=1 exec 'zsh' -i"));
         assert!(!cmd.contains("ZDOTDIR"));
         assert!(cmd.contains("go back."));
+    }
+
+    #[test]
+    fn build_resume_cmd_execs_the_users_shell() {
+        let p = home_path("projects/p");
+        for shell in ["/opt/homebrew/bin/bash", "/usr/local/bin/fish"] {
+            let cmd = build_resume_cmd(&p, "s1", false, shell, None, None, 1);
+            assert!(cmd.contains(&format!("exec '{shell}' -i")));
+            assert!(!cmd.contains("zsh"));
+        }
+    }
+
+    #[test]
+    fn build_resume_cmd_quotes_session_id() {
+        let p = home_path("projects/p");
+        let cmd = build_resume_cmd(&p, "s1; rm -rf /", true, "zsh", None, None, 0);
+        assert!(cmd.ends_with("&& claude --resume 's1; rm -rf /'"));
+    }
+
+    #[test]
+    fn build_resume_cmd_quotes_prev_dir_in_message() {
+        let p = home_path("projects/p");
+        let prev = home_path("it's here");
+        let cmd = build_resume_cmd(&p, "s1", false, "zsh", None, Some(&prev), 1);
+        // The message is a single echo argument, so the quote in the path must be escaped.
+        assert!(cmd.contains(&format!("echo 'Claude session ended. Type exit or clauhist --return to go back to {}.'", prev.replace('\'', "'\\''"))));
     }
 
     #[test]
     fn build_resume_cmd_quotes_project_path_with_special_chars() {
         let p = home_path("projects/it's here");
         let quoted = shell_quote(&p);
-        let cmd = build_resume_cmd(&p, "sess-1", true, None, None, 0);
-        assert_eq!(cmd, format!("cd {quoted} && claude --resume sess-1"));
+        let cmd = build_resume_cmd(&p, "sess-1", true, "zsh", None, None, 0);
+        assert_eq!(cmd, format!("cd {quoted} && claude --resume 'sess-1'"));
 
-        let cmd = build_resume_cmd(&p, "sess-1", false, None, None, 1);
-        assert!(cmd.starts_with(&format!("cd {quoted} && claude --resume sess-1;")));
+        let cmd = build_resume_cmd(&p, "sess-1", false, "zsh", None, None, 1);
+        assert!(cmd.starts_with(&format!("cd {quoted} && claude --resume 'sess-1';")));
+    }
+
+    #[test]
+    fn shell_is_zsh_matches_on_basename_only() {
+        assert!(shell_is_zsh("zsh"));
+        assert!(shell_is_zsh("/bin/zsh"));
+        assert!(shell_is_zsh("/opt/homebrew/bin/zsh"));
+        assert!(!shell_is_zsh("/bin/bash"));
+        assert!(!shell_is_zsh("/usr/local/bin/fish"));
+        assert!(!shell_is_zsh("/bin/zsh-static"));
     }
 
     #[test]
@@ -687,6 +772,55 @@ mod tests {
         let dir = setup_clauhist_zdotdir(2);
         let content = std::fs::read_to_string(dir.join(".zshrc")).unwrap();
         assert!(content.contains("[clauhist(2)]"));
+    }
+
+    #[test]
+    fn setup_clauhist_zdotdir_forwards_zshenv_then_restores_itself() {
+        let dir = setup_clauhist_zdotdir(1);
+        let orig = std::env::var("ZDOTDIR").unwrap_or_else(|_| std::env::var("HOME").unwrap());
+        let content = std::fs::read_to_string(dir.join(".zshenv")).unwrap();
+
+        assert!(content.contains(&format!("source {}/.zshenv", shell_quote(&orig))));
+        // ZDOTDIR must point back here so zsh still reads the .zshrc we generated.
+        assert!(content.contains(&format!("ZDOTDIR={}", shell_quote(&dir.to_string_lossy()))));
+    }
+
+    /// End-to-end check of the .zshenv forwarding against a real zsh.
+    #[test]
+    fn generated_zdotdir_sources_zshenv_in_a_real_zsh() {
+        let fake_home = unique_temp_path("home");
+        std::fs::create_dir_all(&fake_home).unwrap();
+        std::fs::write(fake_home.join(".zshenv"), "export CLAUHIST_TEST_VAR=from_zshenv\n").unwrap();
+        std::fs::write(fake_home.join(".zshrc"), "").unwrap();
+
+        let zdotdir = unique_temp_path("zdotdir");
+        std::fs::create_dir_all(&zdotdir).unwrap();
+        std::fs::write(
+            zdotdir.join(".zshenv"),
+            format!(
+                "[[ -f {orig}/.zshenv ]] && source {orig}/.zshenv\nZDOTDIR={here}\n",
+                orig = shell_quote(&fake_home.to_string_lossy()),
+                here = shell_quote(&zdotdir.to_string_lossy()),
+            ),
+        )
+        .unwrap();
+        std::fs::write(zdotdir.join(".zshrc"), "print -r -- \"$CLAUHIST_TEST_VAR\"\n").unwrap();
+
+        let output = std::process::Command::new("zsh")
+            .args(["-i", "-c", "true"])
+            .env("HOME", &fake_home)
+            .env("ZDOTDIR", &zdotdir)
+            .output()
+            .unwrap();
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("from_zshenv"),
+            "user's .zshenv must be sourced in the sub-shell, got: {stdout:?}"
+        );
+
+        std::fs::remove_dir_all(fake_home).unwrap();
+        std::fs::remove_dir_all(zdotdir).unwrap();
     }
 
     #[test]
