@@ -371,10 +371,14 @@ fn cmd_browse(sessions: Vec<Session>, print_mode: bool, exe_path: &str) {
         "--preview-window=down:50%:wrap".to_string(),
         "--height=85%".to_string(),
         "--border=rounded".to_string(),
-        "--header=Claude Code History Browser  [Enter: resume  Ctrl-/: toggle preview  Ctrl-C: cancel]"
+        "--header=Claude Code History Browser  [Enter: resume  Ctrl-O: toggle preview  Ctrl-C: cancel]"
             .to_string(),
         "--prompt=Search: ".to_string(),
         "--no-sort".to_string(),
+        // fzf treats ctrl-/ as an alias for ctrl-_ (0x1F), which some terminals
+        // (e.g. WezTerm) never emit. ctrl-o is a plain ASCII control character,
+        // so it works everywhere.
+        "--bind=ctrl-o:toggle-preview".to_string(),
         "--bind=ctrl-/:toggle-preview".to_string(),
     ];
 

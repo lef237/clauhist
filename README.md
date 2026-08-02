@@ -4,7 +4,7 @@ Browse Claude Code history across working directories and resume sessions.
 
 ```
 ╭───────────────────────────────────────────────────────────────────────────────────────╮
-│ Claude Code History Browser  [Enter: resume  Ctrl-/: toggle preview  Ctrl-C: cancel]  │
+│ Claude Code History Browser  [Enter: resume  Ctrl-O: toggle preview  Ctrl-C: cancel]  │
 ├───────────────────────────────────────────────────────────────────────────────────────┤
 │ Search:                                                                               │
 │ > 2026-03-18 09:12  ✓ ~/projects/myapp      Tell me about Rust error handling…  (12)  │
@@ -82,7 +82,8 @@ The fzf browser opens with your Claude Code sessions sorted by most recent activ
 | `Enter`    | Resume the selected session       |
 | Type       | Filter sessions by keyword        |
 | `↑` / `↓` | Move up / down                    |
-| `Ctrl-/`   | Toggle the preview pane           |
+| `Ctrl-O`   | Toggle the preview pane           |
+| `Ctrl-/`   | Toggle the preview pane (not supported by every terminal) |
 | `Ctrl-C`   | Cancel and exit                   |
 
 ### Reading the list
@@ -95,7 +96,7 @@ The fzf browser opens with your Claude Code sessions sorted by most recent activ
 └── last activity timestamp
 ```
 
-The preview pane (toggle with `Ctrl-/`) shows the project path, timestamps, and all messages in the session.
+The preview pane (toggle with `Ctrl-O`) shows the project path, timestamps, and all messages in the session.
 
 ---
 
@@ -124,6 +125,9 @@ Install fzf: `brew install fzf` (macOS) or see the [fzf installation guide](http
 
 **`clauhist: command not found`**
 `~/.cargo/bin` is not in your `PATH`. Add `export PATH="$HOME/.cargo/bin:$PATH"` to `.zshrc`.
+
+**`Ctrl-/` does not toggle the preview**
+fzf treats `Ctrl-/` as an alias for `Ctrl-_` (ASCII `0x1F`), and some terminals — WezTerm, for example — never emit that byte. Use `Ctrl-O` instead; it is a plain ASCII control character and works in every terminal.
 
 **Sessions marked with `✗`**
 The project directory has been deleted or moved. The session can still be resumed, but the `cd` step will fail. Claude will open in the directory where you ran `clauhist`.
