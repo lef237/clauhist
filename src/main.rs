@@ -52,12 +52,25 @@ enum Commands {
     },
 }
 
-fn history_file() -> PathBuf {
+/// Claude Code keeps its data in `~/.claude` unless `CLAUDE_CONFIG_DIR` points
+/// elsewhere. clauhist has to follow the same rule, otherwise a relocated
+/// installation looks like it has no history at all.
+fn claude_config_dir() -> PathBuf {
+    if let Some(dir) = std::env::var("CLAUDE_CONFIG_DIR")
+        .ok()
+        .filter(|d| !d.is_empty())
+    {
+        return PathBuf::from(dir);
+    }
     let home = std::env::var("HOME").unwrap_or_else(|_| {
-        eprintln!("HOME environment variable not set");
+        eprintln!("Neither CLAUDE_CONFIG_DIR nor HOME is set");
         std::process::exit(1);
     });
-    PathBuf::from(home).join(".claude").join("history.jsonl")
+    PathBuf::from(home).join(".claude")
+}
+
+fn history_file() -> PathBuf {
+    claude_config_dir().join("history.jsonl")
 }
 
 fn parse_sessions(content: &str) -> HashMap<String, Vec<HistoryEntry>> {
@@ -79,45 +92,54 @@ fn parse_sessions(content: &str) -> HashMap<String, Vec<HistoryEntry>> {
     sessions
 }
 
-fn read_sessions() -> HashMap<String, Vec<HistoryEntry>> {
-    let path = history_file();
-    let content = match std::fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(_) => return HashMap::new(),
-    };
-    parse_sessions(&content)
+/// Entries of a single session. fzf re-runs the preview command on every cursor
+/// move, so this skips the JSON parse for lines that cannot belong to the
+/// session instead of parsing the whole history the way the browser does.
+fn parse_session_entries(content: &str, session_id: &str) -> Vec<HistoryEntry> {
+    content
+        .lines()
+        .filter(|line| line.contains(session_id))
+        .filter_map(|line| serde_json::from_str::<HistoryEntry>(line).ok())
+        .filter(|entry| entry.session_id == session_id)
+        .collect()
+}
+
+fn read_history() -> String {
+    std::fs::read_to_string(history_file()).unwrap_or_default()
+}
+
+fn build_session(session_id: String, mut entries: Vec<HistoryEntry>) -> Session {
+    entries.sort_by_key(|e| e.timestamp.unwrap_or(0));
+    let project = entries
+        .first()
+        .and_then(|e| e.project.clone())
+        .unwrap_or_else(|| "unknown".to_string());
+    let first_ts = entries.first().and_then(|e| e.timestamp).unwrap_or(0);
+    let last_ts = entries.last().and_then(|e| e.timestamp).unwrap_or(0);
+    let messages = entries
+        .iter()
+        .filter_map(|e| {
+            let display = e.display.clone().unwrap_or_default();
+            if display.is_empty() {
+                None
+            } else {
+                Some((e.timestamp.unwrap_or(0), display))
+            }
+        })
+        .collect();
+    Session {
+        session_id,
+        project,
+        first_ts,
+        last_ts,
+        messages,
+    }
 }
 
 fn build_sessions(raw: HashMap<String, Vec<HistoryEntry>>) -> Vec<Session> {
     let mut sessions: Vec<Session> = raw
         .into_iter()
-        .map(|(session_id, mut entries)| {
-            entries.sort_by_key(|e| e.timestamp.unwrap_or(0));
-            let project = entries
-                .first()
-                .and_then(|e| e.project.clone())
-                .unwrap_or_else(|| "unknown".to_string());
-            let first_ts = entries.first().and_then(|e| e.timestamp).unwrap_or(0);
-            let last_ts = entries.last().and_then(|e| e.timestamp).unwrap_or(0);
-            let messages = entries
-                .iter()
-                .filter_map(|e| {
-                    let display = e.display.clone().unwrap_or_default();
-                    if display.is_empty() {
-                        None
-                    } else {
-                        Some((e.timestamp.unwrap_or(0), display))
-                    }
-                })
-                .collect();
-            Session {
-                session_id,
-                project,
-                first_ts,
-                last_ts,
-                messages,
-            }
-        })
+        .map(|(session_id, entries)| build_session(session_id, entries))
         .collect();
     sessions.sort_by(|a, b| b.last_ts.cmp(&a.last_ts));
     sessions
@@ -233,8 +255,11 @@ fn build_resume_cmd(project: &str, session_id: &str, print_mode: bool, shell: &s
             .map(|d| format!("Type exit or clauhist --return to go back to {d}."))
             .unwrap_or_else(|| "Type exit or clauhist --return to go back.".to_string());
         let ended_msg = shell_quote(&format!("Claude session ended. {back_msg}"));
+        // `$$` is the PID of the `sh` running this command, and `exec` keeps it,
+        // so the interactive shell ends up recording its own PID. `clauhist
+        // --return` checks it before signalling anything.
         format!(
-            "{}; echo ''; echo {ended_msg}; CLAUHIST_SHELL={depth} {prev_dir_env}{zdotdir_env}exec {} -i",
+            "{}; echo ''; echo {ended_msg}; CLAUHIST_SHELL={depth} CLAUHIST_SHELL_PID=$$ {prev_dir_env}{zdotdir_env}exec {} -i",
             base,
             shell_quote(shell)
         )
@@ -334,28 +359,14 @@ end"#
     }
 }
 
-fn cmd_preview(session_id: &str, raw: HashMap<String, Vec<HistoryEntry>>) {
-    let sessions = build_sessions(raw);
-    let session = match sessions.iter().find(|s| s.session_id == session_id) {
-        Some(s) => s,
-        None => {
-            println!("Session not found: {}", session_id);
-            return;
-        }
-    };
-    print!("{}", render_preview(session));
-}
-
-fn get_ppid() -> Option<i32> {
-    let pid = std::process::id();
-    let output = Command::new("ps")
-        .args(["-o", "ppid=", "-p", &pid.to_string()])
-        .output()
-        .ok()?;
-    String::from_utf8_lossy(&output.stdout)
-        .trim()
-        .parse::<i32>()
-        .ok()
+fn cmd_preview(session_id: &str, content: &str) {
+    let entries = parse_session_entries(content, session_id);
+    if entries.is_empty() {
+        println!("Session not found: {}", session_id);
+        return;
+    }
+    let session = build_session(session_id.to_string(), entries);
+    print!("{}", render_preview(&session));
 }
 
 fn cmd_return() {
@@ -364,13 +375,18 @@ fn cmd_return() {
         std::process::exit(1);
     }
 
-    let ppid = match get_ppid() {
-        Some(p) => p,
-        None => {
-            eprintln!("Could not determine parent shell PID.");
-            std::process::exit(1);
-        }
-    };
+    // Being someone's child is not proof of whose child: PIDs are reused, and
+    // a shell started by hand inside the sub-shell inherits CLAUHIST_SHELL too.
+    // The sub-shell records its own PID, so only signal a parent that matches it.
+    let ppid = unsafe { libc::getppid() };
+    let recorded = std::env::var("CLAUHIST_SHELL_PID")
+        .ok()
+        .and_then(|v| v.parse::<i32>().ok());
+    if recorded != Some(ppid) {
+        eprintln!("clauhist --return only works directly in the clauhist sub-shell.");
+        eprintln!("Type exit to leave the current shell.");
+        std::process::exit(1);
+    }
 
     let prev_dir = std::env::var("CLAUHIST_PREV_DIR").ok();
     match &prev_dir {
@@ -378,9 +394,17 @@ fn cmd_return() {
         None => eprintln!("Returned to previous shell."),
     }
 
-    // SIGKILL terminates the parent shell instantly — no signal handler runs,
-    // so no "jobs SIGHUPed" or "hangup" warnings appear.
-    unsafe { libc::kill(ppid, libc::SIGKILL); }
+    // SIGHUP, not SIGKILL: the shell runs its normal exit path, so zsh and bash
+    // still write their history file — SIGKILL threw away everything typed in
+    // the sub-shell. SIGTERM would be ignored by an interactive bash; SIGHUP is
+    // what closing a terminal sends, and no shell prints a warning for it.
+    if unsafe { libc::kill(ppid, libc::SIGHUP) } != 0 {
+        eprintln!(
+            "Failed to signal the clauhist sub-shell: {}",
+            std::io::Error::last_os_error()
+        );
+        std::process::exit(1);
+    }
 
     std::process::exit(0);
 }
@@ -515,11 +539,10 @@ fn main() {
             cmd_init(&shell);
         }
         Some(Commands::Preview { session_id }) => {
-            cmd_preview(&session_id, read_sessions());
+            cmd_preview(&session_id, &read_history());
         }
         None => {
-            let raw = read_sessions();
-            let sessions = build_sessions(raw);
+            let sessions = build_sessions(parse_sessions(&read_history()));
             if sessions.is_empty() {
                 let path = history_file();
                 if !path.exists() {
@@ -635,6 +658,104 @@ mod tests {
     }
 
     #[test]
+    fn parse_session_entries_only_returns_the_requested_session() {
+        let p = home_path("projects/a");
+        let raw = format!(
+            "\n\
+             {{\"sessionId\":\"alpha\",\"display\":\"first\",\"timestamp\":10,\"project\":\"{p}\"}}\n\
+             not json\n\
+             {{\"sessionId\":\"beta\",\"display\":\"talks about alpha\",\"timestamp\":20,\"project\":\"{p}\"}}\n\
+             {{\"sessionId\":\"alpha\",\"display\":\"second\",\"timestamp\":30,\"project\":\"{p}\"}}\n"
+        );
+
+        let entries = parse_session_entries(&raw, "alpha");
+
+        // The beta line mentions "alpha" in its text, so the cheap line filter
+        // lets it through — the session id check has to drop it.
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].display.as_deref(), Some("first"));
+        assert_eq!(entries[1].display.as_deref(), Some("second"));
+        assert!(parse_session_entries(&raw, "missing").is_empty());
+    }
+
+    #[test]
+    fn targeted_parse_renders_the_same_preview_as_the_full_parse() {
+        let p = home_path("projects/a");
+        let raw = format!(
+            "{{\"sessionId\":\"alpha\",\"display\":\"later\",\"timestamp\":30,\"project\":\"{p}\"}}\n\
+             {{\"sessionId\":\"beta\",\"display\":\"other\",\"timestamp\":40,\"project\":\"{p}\"}}\n\
+             {{\"sessionId\":\"alpha\",\"display\":\"\",\"timestamp\":20,\"project\":\"{p}\"}}\n\
+             {{\"sessionId\":\"alpha\",\"display\":\"first\",\"timestamp\":10,\"project\":\"{p}\"}}\n"
+        );
+
+        let all = build_sessions(parse_sessions(&raw));
+        let from_full = all.iter().find(|s| s.session_id == "alpha").unwrap();
+        let targeted = build_session("alpha".to_string(), parse_session_entries(&raw, "alpha"));
+
+        assert_eq!(render_preview(&targeted), render_preview(from_full));
+    }
+
+    #[test]
+    fn preview_reads_history_from_claude_config_dir() {
+        let config_dir = unique_temp_path("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let p = home_path("projects/relocated");
+        std::fs::write(
+            config_dir.join("history.jsonl"),
+            format!(
+                "{{\"sessionId\":\"relocated-1\",\"display\":\"hello from CLAUDE_CONFIG_DIR\",\"timestamp\":10,\"project\":\"{p}\"}}\n"
+            ),
+        )
+        .unwrap();
+
+        let output = std::process::Command::new(clauhist_bin())
+            .args(["preview", "relocated-1"])
+            .env("CLAUDE_CONFIG_DIR", &config_dir)
+            .output()
+            .unwrap();
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("hello from CLAUDE_CONFIG_DIR"),
+            "history must be read from $CLAUDE_CONFIG_DIR, got: {stdout:?}"
+        );
+
+        std::fs::remove_dir_all(config_dir).unwrap();
+    }
+
+    #[test]
+    fn history_falls_back_to_home_when_config_dir_is_unset_or_empty() {
+        let fake_home = unique_temp_path("home");
+        std::fs::create_dir_all(fake_home.join(".claude")).unwrap();
+        let p = home_path("projects/plain");
+        std::fs::write(
+            fake_home.join(".claude").join("history.jsonl"),
+            format!(
+                "{{\"sessionId\":\"home-1\",\"display\":\"hello from HOME\",\"timestamp\":10,\"project\":\"{p}\"}}\n"
+            ),
+        )
+        .unwrap();
+
+        for config_dir in [None, Some("")] {
+            let mut cmd = std::process::Command::new(clauhist_bin());
+            cmd.args(["preview", "home-1"]).env("HOME", &fake_home);
+            match config_dir {
+                Some(v) => cmd.env("CLAUDE_CONFIG_DIR", v),
+                None => cmd.env_remove("CLAUDE_CONFIG_DIR"),
+            };
+
+            let output = cmd.output().unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                stdout.contains("hello from HOME"),
+                "CLAUDE_CONFIG_DIR={config_dir:?} must fall back to $HOME/.claude, got: {stdout:?}"
+            );
+        }
+
+        std::fs::remove_dir_all(fake_home).unwrap();
+    }
+
+    #[test]
     fn truncate_respects_character_boundaries() {
         assert_eq!(truncate("こんにちは世界", 4), "こんにち…");
         assert_eq!(truncate("rust", 4), "rust");
@@ -707,7 +828,7 @@ mod tests {
     fn build_resume_cmd_default_mode_without_zdotdir() {
         let p = home_path("projects/my-project");
         let cmd = build_resume_cmd(&p, "abc-123", false, "zsh", None, None, 1);
-        assert!(cmd.contains("CLAUHIST_SHELL=1 exec 'zsh' -i"));
+        assert!(cmd.contains("CLAUHIST_SHELL=1 CLAUHIST_SHELL_PID=$$ exec 'zsh' -i"));
         assert!(!cmd.contains("ZDOTDIR"));
         assert!(cmd.contains("go back."));
     }
@@ -720,6 +841,115 @@ mod tests {
             assert!(cmd.contains(&format!("exec '{shell}' -i")));
             assert!(!cmd.contains("zsh"));
         }
+    }
+
+    #[test]
+    fn build_resume_cmd_records_the_subshell_pid() {
+        let p = home_path("projects/p");
+        let cmd = build_resume_cmd(&p, "s1", false, "zsh", None, None, 1);
+        // Deliberately unquoted: sh expands $$ to the PID that exec hands to the shell.
+        assert!(cmd.contains("CLAUHIST_SHELL_PID=$$ "));
+
+        let cmd = build_resume_cmd(&p, "s1", true, "", None, None, 0);
+        assert!(!cmd.contains("CLAUHIST_SHELL_PID"));
+    }
+
+    /// The PID must belong to the shell `clauhist --return` will signal — the
+    /// one exec replaced sh with, not some intermediate process.
+    #[test]
+    fn resume_cmd_records_the_pid_of_the_exec_ed_shell() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let project = unique_temp_path("project");
+        std::fs::create_dir_all(&project).unwrap();
+        let fake_shell = project.join("fake-shell");
+        std::fs::write(&fake_shell, "#!/bin/sh\necho \"$CLAUHIST_SHELL_PID $$\"\n").unwrap();
+        std::fs::set_permissions(&fake_shell, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let cmd = build_resume_cmd(
+            &project.to_string_lossy(),
+            "s1",
+            false,
+            &fake_shell.to_string_lossy(),
+            None,
+            None,
+            1,
+        );
+        // Absolute path: the empty PATH below would make "sh" itself unresolvable.
+        let output = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(&cmd)
+            // Empty PATH keeps the `claude --resume` part from finding a real claude.
+            .env("PATH", "")
+            .output()
+            .unwrap();
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let last = stdout.lines().last().unwrap_or_default();
+        let (recorded, actual) = last.split_once(' ').unwrap_or(("", "-"));
+        assert_eq!(
+            recorded, actual,
+            "CLAUHIST_SHELL_PID must be the shell's own PID, got: {stdout:?}"
+        );
+
+        std::fs::remove_dir_all(project).unwrap();
+    }
+
+    #[test]
+    fn return_flag_refuses_when_parent_is_not_the_recorded_subshell() {
+        let bin = shell_quote(&clauhist_bin().to_string_lossy());
+        // Run through an extra sh so a regression signals that throwaway shell
+        // instead of the test runner.
+        for recorded in [Some("999999"), None] {
+            let mut cmd = std::process::Command::new("sh");
+            cmd.arg("-c")
+                .arg(format!("{bin} --return; echo \"rc=$?\""))
+                .env("CLAUHIST_SHELL", "1");
+            match recorded {
+                Some(pid) => cmd.env("CLAUHIST_SHELL_PID", pid),
+                None => cmd.env_remove("CLAUHIST_SHELL_PID"),
+            };
+
+            let output = cmd.output().unwrap();
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                stderr.contains("only works directly in the clauhist sub-shell"),
+                "CLAUHIST_SHELL_PID={recorded:?} must be refused, got: {stderr:?}"
+            );
+            assert!(stdout.contains("rc=1"), "expected exit status 1, got: {stdout:?}");
+        }
+    }
+
+    /// Happy path: the recorded shell is hung up (so it saves its history)
+    /// rather than killed, and it stops running the rest of its input.
+    #[test]
+    fn return_flag_hangs_up_the_recorded_subshell() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let marker = unique_temp_path("marker");
+        std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        let inner = format!(
+            "{bin} --return; sleep 1; : > {marker}",
+            bin = shell_quote(&clauhist_bin().to_string_lossy()),
+            marker = shell_quote(&marker.to_string_lossy()),
+        );
+        let output = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!(
+                "CLAUHIST_SHELL=1 CLAUHIST_SHELL_PID=$$ exec sh -c {}",
+                shell_quote(&inner)
+            ))
+            .output()
+            .unwrap();
+        let status = output.status;
+
+        assert_eq!(
+            status.signal(),
+            Some(libc::SIGHUP),
+            "sub-shell should be hung up, not killed: {status:?}"
+        );
+        assert!(!marker.exists(), "sub-shell kept running after --return");
     }
 
     #[test]
