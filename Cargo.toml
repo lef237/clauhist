@@ -1,6 +1,6 @@
 [package]
 name = "clauhist"
-version = "1.0.2"
+version = "1.1.0"
 edition = "2021"
 description = "Browse Claude Code history across working directories and resume sessions"
 license = "MIT"
