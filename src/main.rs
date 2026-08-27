@@ -47,7 +47,7 @@ enum Commands {
     Preview { session_id: String },
     /// Print shell integration code for your shell
     Init {
-        /// Shell name (zsh, bash, fish)
+        /// Shell name (zsh, bash, fish, nu)
         shell: String,
     },
 }
@@ -352,8 +352,24 @@ fn cmd_init(shell: &str) {
 end"#
             );
         }
+        "nu" => {
+            // Nu has no generic POSIX `eval`, so the wrapper parses the existing
+            // `cd '<project>' && claude --resume <sid>` contract and runs cd + claude
+            // itself so the cd persists in the caller's environment.
+            println!(
+                r#"def --env clauhist [...args: string] {{
+    let out = (^clauhist --print ...$args | str trim)
+    if ($out | is-empty) {{ return }}
+    let m = ($out | parse --regex "^cd '(?<project>.*)' && claude --resume (?<sid>\\S+)$")
+    if ($m | is-empty) {{ return }}
+    let project = ($m | get 0.project | str replace --all "'\\''" "'")
+    cd $project
+    ^claude --resume ($m | get 0.sid)
+}}"#
+            );
+        }
         _ => {
-            eprintln!("Unsupported shell: {}. Supported: zsh, bash, fish", shell);
+            eprintln!("Unsupported shell: {}. Supported: zsh, bash, fish, nu", shell);
             std::process::exit(1);
         }
     }
@@ -1084,6 +1100,36 @@ mod tests {
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(stdout.contains("--print"), "shell integration must pass --print to binary");
         assert!(stdout.contains("eval"), "shell integration must eval the output");
+    }
+
+    #[test]
+    fn cmd_init_nu_parses_existing_posix_contract() {
+        let output = std::process::Command::new(clauhist_bin().to_str().unwrap())
+            .args(["init", "nu"])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("--print"), "must invoke the same --print as other shells");
+        assert!(stdout.contains("def --env clauhist"), "must opt into env mutation so cd propagates");
+        // The wrapper parses the POSIX `cd '<project>' && claude --resume <sid>` output
+        // that build_resume_cmd emits in print mode — verify the regex shape matches.
+        let posix = build_resume_cmd("/tmp/x", "abc-123", true, None, None, 0);
+        assert_eq!(posix, "cd '/tmp/x' && claude --resume abc-123");
+        assert!(stdout.contains(r#"^cd '(?<project>.*)' && claude --resume (?<sid>\\S+)$"#));
+        // And the inverse of shell_quote's apostrophe escape.
+        assert!(stdout.contains(r#"str replace --all "'\\''" "'""#));
+    }
+
+    #[test]
+    fn cmd_init_unsupported_shell_lists_nu_as_supported() {
+        let output = std::process::Command::new(clauhist_bin().to_str().unwrap())
+            .args(["init", "tcsh"])
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("nu"), "error message must advertise nu as supported");
     }
 
     #[test]

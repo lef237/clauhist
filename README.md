@@ -111,6 +111,13 @@ To stay in the current shell and enable `cd -` to go back, add shell integration
 eval "$(clauhist init zsh)"   # or bash, fish
 ```
 
+For [Nushell](https://www.nushell.sh/), add to your `config.nu`:
+
+```nu
+clauhist init nu | save -f ~/.cache/clauhist-init.nu
+source ~/.cache/clauhist-init.nu
+```
+
 With this, selecting a session changes your current shell's directory and resumes Claude. After Claude exits, you remain in the project directory, and `cd -` takes you back.
 
 ---
