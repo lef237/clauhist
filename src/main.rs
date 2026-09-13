@@ -240,15 +240,24 @@ fn build_resume_cmd(
     project: &str,
     session_id: &str,
     shell: &str,
+    config_dir: &str,
     zdotdir: Option<&str>,
     prev_dir: Option<&str>,
     depth: u32,
 ) -> String {
+    // `env CLAUDE_CONFIG_DIR=... claude` rather than an inline `VAR=value`
+    // prefix: the generated command is run through `sh` and the same shape is
+    // built by the shell wrappers, one of which (fish) has no inline
+    // assignment. `env` is portable across all of them.
     let base = format!(
-        "cd {} && claude --resume {}",
+        "cd {} && env CLAUDE_CONFIG_DIR={} claude --resume {}",
         shell_quote(project),
+        shell_quote(config_dir),
         shell_quote(session_id)
     );
+    // Keep the sub-shell on the same account, so a plain `claude` there
+    // resolves to the config directory the session was resumed from.
+    let config_dir_env = format!("CLAUDE_CONFIG_DIR={} ", shell_quote(config_dir));
     let zdotdir_env = zdotdir
         .map(|d| format!("ZDOTDIR={} ", shell_quote(d)))
         .unwrap_or_default();
@@ -263,21 +272,21 @@ fn build_resume_cmd(
     // so the interactive shell ends up recording its own PID. `clauhist
     // --return` checks it before signalling anything.
     format!(
-        "{}; echo ''; echo {ended_msg}; CLAUHIST_SHELL={depth} CLAUHIST_SHELL_PID=$$ {prev_dir_env}{zdotdir_env}exec {} -i",
+        "{}; echo ''; echo {ended_msg}; CLAUHIST_SHELL={depth} CLAUHIST_SHELL_PID=$$ {prev_dir_env}{zdotdir_env}{config_dir_env}exec {} -i",
         base,
         shell_quote(shell)
     )
 }
 
-/// Two-line contract used by the shell wrappers: the project path on the first
-/// line, the session id on the second. The wrappers split on newlines, so both
-/// values must be newline-free for the contract to round-trip; returns `None`
-/// when either would break it.
-fn print_contract(project: &str, session_id: &str) -> Option<String> {
-    if project.contains('\n') || session_id.contains('\n') {
+/// Three-line contract used by the shell wrappers: the project path, the
+/// session id, then the Claude config directory to resume under. The wrappers
+/// split on newlines, so every value must be newline-free for the contract to
+/// round-trip; returns `None` when any of them would break it.
+fn print_contract(project: &str, session_id: &str, config_dir: &str) -> Option<String> {
+    if project.contains('\n') || session_id.contains('\n') || config_dir.contains('\n') {
         return None;
     }
-    Some(format!("{project}\n{session_id}"))
+    Some(format!("{project}\n{session_id}\n{config_dir}"))
 }
 
 /// Interactive shell to hand back to after Claude exits. The generated command
@@ -354,10 +363,13 @@ fn cmd_init(shell: &str) {
                 r#"clauhist() {{
     local out
     out=$(command clauhist --print "$@") || return
-    [[ "$out" != *$'\n'* ]] && return
+    [[ "$out" == *$'\n'*$'\n'* ]] || return
     local project="${{out%%$'\n'*}}"
-    local sid="${{out##*$'\n'}}"
-    cd -- "$project" && claude --resume "$sid"
+    local rest="${{out#*$'\n'}}"
+    local sid="${{rest%%$'\n'*}}"
+    local cfg="${{rest#*$'\n'}}"
+    [[ "$cfg" != *$'\n'* ]] || return
+    cd -- "$project" && CLAUDE_CONFIG_DIR="$cfg" claude --resume "$sid"
 }}"#
             );
         }
@@ -365,10 +377,10 @@ fn cmd_init(shell: &str) {
             println!(
                 r#"function clauhist
     set -l out (command clauhist --print $argv)
-    if test (count $out) -ne 2
+    if test (count $out) -ne 3
         return
     end
-    cd $out[1]; and claude --resume $out[2]
+    cd $out[1]; and env CLAUDE_CONFIG_DIR=$out[3] claude --resume $out[2]
 end"#
             );
         }
@@ -380,10 +392,12 @@ end"#
         print --stderr $result.stderr
         return
     }}
-    let lines = ($result.stdout | str trim | lines)
-    if ($lines | length) != 2 {{ return }}
+    let lines = ($result.stdout | str trim --right | lines)
+    if ($lines | length) != 3 {{ return }}
     cd ($lines | get 0)
-    ^claude --resume ($lines | get 1)
+    with-env {{ CLAUDE_CONFIG_DIR: ($lines | get 2) }} {{
+        ^claude --resume ($lines | get 1)
+    }}
 }}"#
             );
         }
@@ -529,13 +543,16 @@ fn cmd_browse(sessions: Vec<Session>, print_mode: bool, exe_path: &str) {
         std::process::exit(1);
     }
 
+    let config_dir = claude_config_dir().to_string_lossy().into_owned();
+
     if print_mode {
-        // Two-line contract for shell wrappers: project on line 1, session id on line 2.
-        // Each shell formats its own `cd` + `claude --resume` from these.
-        match print_contract(project, session_id) {
+        // Three-line contract for shell wrappers: project, session id, then the
+        // config directory to resume under. Each shell formats its own `cd` +
+        // `claude --resume` from these.
+        match print_contract(project, session_id, &config_dir) {
             Some(out) => println!("{out}"),
             None => {
-                eprintln!("Cannot resume: the project path or session id contains a newline.");
+                eprintln!("Cannot resume: the project path, session id, or config directory contains a newline.");
                 std::process::exit(1);
             }
         }
@@ -555,6 +572,7 @@ fn cmd_browse(sessions: Vec<Session>, print_mode: bool, exe_path: &str) {
             project,
             session_id,
             &shell,
+            &config_dir,
             zdotdir.as_deref(),
             prev_dir.as_deref(),
             depth,
@@ -842,10 +860,14 @@ mod tests {
     fn build_resume_cmd_includes_subshell_and_env_var() {
         let p = home_path("projects/my-project");
         let zd = home_path("projects/zd");
+        let cfg = home_path(".claude");
         let home = std::env::var("HOME").unwrap();
-        let cmd = build_resume_cmd(&p, "abc-123", "/bin/zsh", Some(&zd), Some(&home), 1);
-        assert!(cmd.starts_with(&format!("cd '{p}' && claude --resume 'abc-123';")));
+        let cmd = build_resume_cmd(&p, "abc-123", "/bin/zsh", &cfg, Some(&zd), Some(&home), 1);
+        assert!(cmd.starts_with(&format!(
+            "cd '{p}' && env CLAUDE_CONFIG_DIR='{cfg}' claude --resume 'abc-123';"
+        )));
         assert!(cmd.contains("CLAUHIST_SHELL=1"));
+        assert!(cmd.contains(&format!("CLAUDE_CONFIG_DIR='{cfg}'")));
         assert!(cmd.contains(&format!("ZDOTDIR='{zd}'")));
         assert!(cmd.contains(&format!("CLAUHIST_PREV_DIR='{home}'")));
         assert!(cmd.contains(&format!("go back to {home}")));
@@ -856,15 +878,16 @@ mod tests {
     #[test]
     fn build_resume_cmd_nested_depth_is_reflected() {
         let p = home_path("projects/p");
-        let cmd = build_resume_cmd(&p, "s1", "zsh", None, None, 3);
+        let cmd = build_resume_cmd(&p, "s1", "zsh", &home_path(".claude"), None, None, 3);
         assert!(cmd.contains("CLAUHIST_SHELL=3"));
     }
 
     #[test]
     fn build_resume_cmd_without_zdotdir() {
         let p = home_path("projects/my-project");
-        let cmd = build_resume_cmd(&p, "abc-123", "zsh", None, None, 1);
-        assert!(cmd.contains("CLAUHIST_SHELL=1 CLAUHIST_SHELL_PID=$$ exec 'zsh' -i"));
+        let cmd = build_resume_cmd(&p, "abc-123", "zsh", &home_path(".claude"), None, None, 1);
+        assert!(cmd.contains("CLAUHIST_SHELL=1 CLAUHIST_SHELL_PID=$$ "));
+        assert!(cmd.contains("exec 'zsh' -i"));
         assert!(!cmd.contains("ZDOTDIR"));
         assert!(cmd.contains("go back."));
     }
@@ -872,17 +895,17 @@ mod tests {
     #[test]
     fn build_resume_cmd_execs_the_users_shell() {
         let p = home_path("projects/p");
+        let cfg = home_path(".claude");
         for shell in ["/opt/homebrew/bin/bash", "/usr/local/bin/fish"] {
-            let cmd = build_resume_cmd(&p, "s1", shell, None, None, 1);
+            let cmd = build_resume_cmd(&p, "s1", shell, &cfg, None, None, 1);
             assert!(cmd.contains(&format!("exec '{shell}' -i")));
-            assert!(!cmd.contains("zsh"));
         }
     }
 
     #[test]
     fn build_resume_cmd_records_the_subshell_pid() {
         let p = home_path("projects/p");
-        let cmd = build_resume_cmd(&p, "s1", "zsh", None, None, 1);
+        let cmd = build_resume_cmd(&p, "s1", "zsh", &home_path(".claude"), None, None, 1);
         // Deliberately unquoted: sh expands $$ to the PID that exec hands to the shell.
         assert!(cmd.contains("CLAUHIST_SHELL_PID=$$ "));
     }
@@ -903,6 +926,7 @@ mod tests {
             &project.to_string_lossy(),
             "s1",
             &fake_shell.to_string_lossy(),
+            &home_path(".claude"),
             None,
             None,
             1,
@@ -911,7 +935,7 @@ mod tests {
         let output = std::process::Command::new("/bin/sh")
             .arg("-c")
             .arg(&cmd)
-            // Empty PATH keeps the `claude --resume` part from finding a real claude.
+            // Empty PATH keeps `env ... claude` from finding a real claude.
             .env("PATH", "")
             .output()
             .unwrap();
@@ -990,31 +1014,46 @@ mod tests {
     #[test]
     fn build_resume_cmd_quotes_session_id() {
         let p = home_path("projects/p");
-        let cmd = build_resume_cmd(&p, "s1; rm -rf /", "zsh", None, None, 1);
+        let cmd = build_resume_cmd(
+            &p,
+            "s1; rm -rf /",
+            "zsh",
+            &home_path(".claude"),
+            None,
+            None,
+            1,
+        );
         assert!(cmd.contains("claude --resume 's1; rm -rf /'"));
     }
 
     #[test]
-    fn print_contract_is_project_then_session_id() {
+    fn print_contract_is_project_session_then_config_dir() {
         assert_eq!(
-            print_contract("/tmp/my-project", "abc-123").as_deref(),
-            Some("/tmp/my-project\nabc-123")
+            print_contract("/tmp/my-project", "abc-123", "/home/u/.claude").as_deref(),
+            Some("/tmp/my-project\nabc-123\n/home/u/.claude")
         );
     }
 
     #[test]
     fn print_contract_rejects_newlines() {
-        // The wrappers split on newlines, so a newline in either value would
-        // silently shift the project/session boundary.
-        assert_eq!(print_contract("/tmp/a\nb", "abc-123"), None);
-        assert_eq!(print_contract("/tmp/proj", "a\nb"), None);
+        // The wrappers split on newlines, so a newline in any value would
+        // silently shift the project/session/config boundary.
+        assert_eq!(
+            print_contract("/tmp/a\nb", "abc-123", "/home/u/.claude"),
+            None
+        );
+        assert_eq!(print_contract("/tmp/proj", "a\nb", "/home/u/.claude"), None);
+        assert_eq!(
+            print_contract("/tmp/proj", "abc-123", "/home\nu/.claude"),
+            None
+        );
     }
 
     #[test]
     fn build_resume_cmd_quotes_prev_dir_in_message() {
         let p = home_path("projects/p");
         let prev = home_path("it's here");
-        let cmd = build_resume_cmd(&p, "s1", "zsh", None, Some(&prev), 1);
+        let cmd = build_resume_cmd(&p, "s1", "zsh", &home_path(".claude"), None, Some(&prev), 1);
         // The message is a single echo argument, so the quote in the path must be escaped.
         assert!(cmd.contains(&format!(
             "echo 'Claude session ended. Type exit or clauhist --return to go back to {}.'",
@@ -1023,11 +1062,15 @@ mod tests {
     }
 
     #[test]
-    fn build_resume_cmd_quotes_project_path_with_special_chars() {
+    fn build_resume_cmd_quotes_project_path_and_config_dir_with_special_chars() {
         let p = home_path("projects/it's here");
-        let quoted = shell_quote(&p);
-        let cmd = build_resume_cmd(&p, "sess-1", "zsh", None, None, 1);
-        assert!(cmd.starts_with(&format!("cd {quoted} && claude --resume 'sess-1';")));
+        let cfg = home_path("it's/.claude-work");
+        let cmd = build_resume_cmd(&p, "sess-1", "zsh", &cfg, None, None, 1);
+        assert!(cmd.starts_with(&format!(
+            "cd {} && env CLAUDE_CONFIG_DIR={} claude --resume 'sess-1';",
+            shell_quote(&p),
+            shell_quote(&cfg)
+        )));
     }
 
     #[test]
@@ -1122,17 +1165,20 @@ mod tests {
     }
 
     #[test]
-    fn cmd_init_zsh_wrapper_consumes_two_line_contract() {
+    fn cmd_init_zsh_wrapper_consumes_three_line_contract() {
         let stdout = run_init("zsh");
         assert!(stdout.contains("--print"));
         assert!(
             stdout.contains(r#"cd -- "$project""#),
             "must cd safely with --"
         );
-        assert!(stdout.contains(r#"claude --resume "$sid""#));
         assert!(
-            stdout.contains(r#"[[ "$out" != *$'\n'* ]] && return"#),
-            "must reject single-line output"
+            stdout.contains(r#"CLAUDE_CONFIG_DIR="$cfg" claude --resume "$sid""#),
+            "must resume under the config directory from the contract"
+        );
+        assert!(
+            stdout.contains(r#"[[ "$out" == *$'\n'*$'\n'* ]] || return"#),
+            "must reject output with fewer than three lines"
         );
         assert!(
             !stdout.contains("eval"),
@@ -1141,31 +1187,34 @@ mod tests {
     }
 
     #[test]
-    fn cmd_init_bash_wrapper_consumes_two_line_contract() {
+    fn cmd_init_bash_wrapper_consumes_three_line_contract() {
         let stdout = run_init("bash");
         assert!(stdout.contains("--print"));
         assert!(stdout.contains(r#"cd -- "$project""#));
-        assert!(stdout.contains(r#"claude --resume "$sid""#));
-        assert!(stdout.contains(r#"[[ "$out" != *$'\n'* ]] && return"#));
+        assert!(stdout.contains(r#"CLAUDE_CONFIG_DIR="$cfg" claude --resume "$sid""#));
+        assert!(stdout.contains(r#"[[ "$out" == *$'\n'*$'\n'* ]] || return"#));
         assert!(!stdout.contains("eval"));
     }
 
     #[test]
-    fn cmd_init_fish_wrapper_consumes_two_line_contract() {
+    fn cmd_init_fish_wrapper_consumes_three_line_contract() {
         let stdout = run_init("fish");
         assert!(stdout.contains("--print"));
         // fish's `cd` builtin rejects `--`, so we trust the variable expansion alone.
         assert!(stdout.contains("cd $out[1]"));
-        assert!(stdout.contains("claude --resume $out[2]"));
         assert!(
-            stdout.contains("test (count $out) -ne 2"),
-            "must require exactly two lines"
+            stdout.contains("env CLAUDE_CONFIG_DIR=$out[3] claude --resume $out[2]"),
+            "fish has no inline assignment, so the config dir goes through env"
+        );
+        assert!(
+            stdout.contains("test (count $out) -ne 3"),
+            "must require exactly three lines"
         );
         assert!(!stdout.contains("eval"));
     }
 
     #[test]
-    fn cmd_init_nu_wrapper_consumes_two_line_contract() {
+    fn cmd_init_nu_wrapper_consumes_three_line_contract() {
         let stdout = run_init("nu");
         assert!(stdout.contains("--print"));
         assert!(
@@ -1179,16 +1228,21 @@ mod tests {
         assert!(stdout.contains("cd ($lines | get 0)"));
         assert!(stdout.contains("^claude --resume ($lines | get 1)"));
         assert!(
-            stdout.contains("($lines | length) != 2"),
-            "must require exactly two lines"
+            stdout.contains("with-env { CLAUDE_CONFIG_DIR: ($lines | get 2) }"),
+            "must resume under the config directory from the contract"
+        );
+        assert!(
+            stdout.contains("($lines | length) != 3"),
+            "must require exactly three lines"
         );
     }
 
     fn run_bash_wrapper_with_stub(stub_stdout: &str, stub_exit: i32) -> std::process::Output {
         // Sources the generated bash wrapper, then calls `clauhist` with PATH overridden
         // so `command clauhist` resolves to a stub that emits `stub_stdout` and exits
-        // with `stub_exit`. The stub also defines `cd` and `claude` as functions that
-        // just echo their args so we can observe whether the wrapper invoked them.
+        // with `stub_exit`. `cd` and `claude` are functions that echo their args (and,
+        // for `claude`, the config dir it was given) so we can observe what the wrapper
+        // invoked them with.
         let wrapper = run_init("bash");
         let stub_dir = unique_temp_path("bash-stub");
         std::fs::create_dir_all(&stub_dir).unwrap();
@@ -1208,7 +1262,7 @@ mod tests {
         let script = format!(
             "{wrapper}\n\
              cd() {{ echo CD:\"$@\"; }}\n\
-             claude() {{ echo CLAUDE:\"$@\"; }}\n\
+             claude() {{ echo CLAUDE:\"${{CLAUDE_CONFIG_DIR}}:$@\"; }}\n\
              clauhist\n",
         );
         let mut path = std::env::var("PATH").unwrap_or_default();
@@ -1225,23 +1279,29 @@ mod tests {
     }
 
     #[test]
-    fn bash_wrapper_runs_cd_and_claude_on_two_line_output() {
-        let out = run_bash_wrapper_with_stub("/tmp/example\nabc-123\n", 0);
+    fn bash_wrapper_runs_cd_and_claude_on_three_line_output() {
+        let out = run_bash_wrapper_with_stub("/tmp/example\nabc-123\n/tmp/cfg\n", 0);
         let stdout = String::from_utf8_lossy(&out.stdout);
         assert!(stdout.contains("CD:-- /tmp/example"), "got: {stdout}");
-        assert!(stdout.contains("CLAUDE:--resume abc-123"), "got: {stdout}");
+        assert!(
+            stdout.contains("CLAUDE:/tmp/cfg:--resume abc-123"),
+            "must pass the config dir to claude; got: {stdout}"
+        );
     }
 
     #[test]
-    fn bash_wrapper_rejects_single_line_output() {
-        // Single line is the canceled-fzf / malformed case. Wrapper must NOT cd or run claude.
-        let out = run_bash_wrapper_with_stub("only-one-line", 0);
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        assert!(!stdout.contains("CD:"), "must not cd; got: {stdout}");
-        assert!(
-            !stdout.contains("CLAUDE:"),
-            "must not resume; got: {stdout}"
-        );
+    fn bash_wrapper_rejects_short_output() {
+        // Fewer than three lines is the canceled-fzf / malformed case. The wrapper
+        // must NOT cd or run claude.
+        for stub in ["only-one-line", "/tmp/example\nabc-123"] {
+            let out = run_bash_wrapper_with_stub(stub, 0);
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            assert!(!stdout.contains("CD:"), "must not cd; got: {stdout}");
+            assert!(
+                !stdout.contains("CLAUDE:"),
+                "must not resume; got: {stdout}"
+            );
+        }
     }
 
     #[test]
@@ -1255,8 +1315,8 @@ mod tests {
     #[test]
     fn bash_wrapper_rejects_failed_command() {
         // Non-zero exit (e.g. the project directory no longer exists) must not cd
-        // or resume even if the stub printed a two-line contract.
-        let out = run_bash_wrapper_with_stub("/tmp/example\nabc-123\n", 1);
+        // or resume even if the stub printed a full contract.
+        let out = run_bash_wrapper_with_stub("/tmp/example\nabc-123\n/tmp/cfg\n", 1);
         let stdout = String::from_utf8_lossy(&out.stdout);
         assert!(
             !stdout.contains("CD:"),
