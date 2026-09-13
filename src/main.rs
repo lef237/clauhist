@@ -269,6 +269,17 @@ fn build_resume_cmd(
     )
 }
 
+/// Two-line contract used by the shell wrappers: the project path on the first
+/// line, the session id on the second. The wrappers split on newlines, so both
+/// values must be newline-free for the contract to round-trip; returns `None`
+/// when either would break it.
+fn print_contract(project: &str, session_id: &str) -> Option<String> {
+    if project.contains('\n') || session_id.contains('\n') {
+        return None;
+    }
+    Some(format!("{project}\n{session_id}"))
+}
+
 /// Interactive shell to hand back to after Claude exits. The generated command
 /// is run through `sh`, so any shell works as the exec target.
 fn resume_shell() -> String {
@@ -521,7 +532,13 @@ fn cmd_browse(sessions: Vec<Session>, print_mode: bool, exe_path: &str) {
     if print_mode {
         // Two-line contract for shell wrappers: project on line 1, session id on line 2.
         // Each shell formats its own `cd` + `claude --resume` from these.
-        println!("{}\n{}", project, session_id);
+        match print_contract(project, session_id) {
+            Some(out) => println!("{out}"),
+            None => {
+                eprintln!("Cannot resume: the project path or session id contains a newline.");
+                std::process::exit(1);
+            }
+        }
     } else {
         let depth = clauhist_depth() + 1;
         let shell = resume_shell();
@@ -975,6 +992,22 @@ mod tests {
         let p = home_path("projects/p");
         let cmd = build_resume_cmd(&p, "s1; rm -rf /", "zsh", None, None, 1);
         assert!(cmd.contains("claude --resume 's1; rm -rf /'"));
+    }
+
+    #[test]
+    fn print_contract_is_project_then_session_id() {
+        assert_eq!(
+            print_contract("/tmp/my-project", "abc-123").as_deref(),
+            Some("/tmp/my-project\nabc-123")
+        );
+    }
+
+    #[test]
+    fn print_contract_rejects_newlines() {
+        // The wrappers split on newlines, so a newline in either value would
+        // silently shift the project/session boundary.
+        assert_eq!(print_contract("/tmp/a\nb", "abc-123"), None);
+        assert_eq!(print_contract("/tmp/proj", "a\nb"), None);
     }
 
     #[test]
