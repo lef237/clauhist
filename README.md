@@ -179,3 +179,11 @@ clauhist is a local-only tool that works entirely on your machine.
 - **What it reads:** `~/.claude/history.jsonl` (or `$CLAUDE_CONFIG_DIR/history.jsonl` when that variable is set) — a local file that Claude Code stores on your machine. This file contains session metadata (session IDs, timestamps, project paths, and the first line of each user message).
 - **What it does NOT do:** clauhist does not access Anthropic's API or servers, and does not transmit any data externally.
 - **How it resumes sessions:** clauhist invokes `claude --resume <session-id>`, which is an [officially documented CLI command](https://docs.anthropic.com/en/docs/claude-code/cli-reference).
+
+---
+
+## Releasing
+
+Maintainers: see [RELEASING.md](RELEASING.md). A release must update **both**
+crates.io (`cargo publish`) and the GitHub Releases page (`gh release create`) —
+they are independent steps.
