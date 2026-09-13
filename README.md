@@ -102,19 +102,28 @@ The preview pane (toggle with `Ctrl-O`) shows the project path, timestamps, and 
 
 ## Multiple accounts
 
-If you use more than one Claude Code account on the same machine — say a personal seat in `~/.claude` and a team seat in `~/.claude-work` — set `CLAUDE_CONFIG_DIR` to choose which history clauhist reads:
+Claude Code supports more than one account on a machine through the `CLAUDE_CONFIG_DIR` environment variable — for example a personal seat in `~/.claude` and a team seat in `~/.claude-work`. clauhist reads history from the same location, and with shell integration installed it resumes the session under that account as well. To browse and resume the team seat:
 
 ```sh
+# zsh / bash
 CLAUDE_CONFIG_DIR="$HOME/.claude-work" clauhist
 ```
 
-This is the same variable Claude Code itself honors, and clauhist passes it through when resuming, so the session reopens under the matching account. When the variable is unset or empty, clauhist reads `~/.claude` as before.
+When the variable is unset or empty, clauhist reads `~/.claude` as before.
 
 A small function keeps it short:
 
 ```sh
 # ~/.zshrc or ~/.bashrc
 clauhist-work() { CLAUDE_CONFIG_DIR="$HOME/.claude-work" clauhist "$@"; }
+```
+
+```fish
+# ~/.config/fish/config.fish
+function clauhist-work
+    set -lx CLAUDE_CONFIG_DIR $HOME/.claude-work
+    clauhist $argv
+end
 ```
 
 ---
