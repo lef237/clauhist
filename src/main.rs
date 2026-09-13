@@ -365,7 +365,10 @@ end"#
             println!(
                 r#"def --env clauhist [...args: string] {{
     let result = (^clauhist --print ...$args | complete)
-    if $result.exit_code != 0 {{ return }}
+    if $result.exit_code != 0 {{
+        print --stderr $result.stderr
+        return
+    }}
     let lines = ($result.stdout | str trim | lines)
     if ($lines | length) != 2 {{ return }}
     cd ($lines | get 0)
@@ -1135,6 +1138,10 @@ mod tests {
         assert!(
             stdout.contains("def --env clauhist"),
             "must opt into env mutation so cd propagates"
+        );
+        assert!(
+            stdout.contains("print --stderr $result.stderr"),
+            "must surface failures instead of returning silently"
         );
         assert!(stdout.contains("cd ($lines | get 0)"));
         assert!(stdout.contains("^claude --resume ($lines | get 1)"));
