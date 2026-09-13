@@ -4,7 +4,7 @@ Browse Claude Code history across working directories and resume sessions.
 
 ```
 ╭───────────────────────────────────────────────────────────────────────────────────────╮
-│ Claude Code History Browser  [Enter: resume  Ctrl-/: toggle preview  Ctrl-C: cancel]  │
+│ Claude Code History Browser  [Enter: resume  Ctrl-O: toggle preview  Ctrl-C: cancel]  │
 ├───────────────────────────────────────────────────────────────────────────────────────┤
 │ Search:                                                                               │
 │ > 2026-03-18 09:12  ✓ ~/projects/myapp      Tell me about Rust error handling…  (12)  │
@@ -26,7 +26,7 @@ If you `cd` into a project and use Claude Code's `/resume` there, you can inspec
 
 The limitation is that this is tied to the directory you are currently in. If you want to look back across many repositories or old working directories, you have to move around and check them one by one.
 
-clauhist reads `~/.claude/history.jsonl`, shows sessions from all working directories in one `fzf` list, and lets you reopen the one you want immediately.
+clauhist reads `~/.claude/history.jsonl` — or `$CLAUDE_CONFIG_DIR/history.jsonl` if you have moved Claude Code's config directory — shows sessions from all working directories in one `fzf` list, and lets you reopen the one you want immediately.
 
 ---
 
@@ -82,7 +82,8 @@ The fzf browser opens with your Claude Code sessions sorted by most recent activ
 | `Enter`    | Resume the selected session       |
 | Type       | Filter sessions by keyword        |
 | `↑` / `↓` | Move up / down                    |
-| `Ctrl-/`   | Toggle the preview pane           |
+| `Ctrl-O`   | Toggle the preview pane           |
+| `Ctrl-/`   | Toggle the preview pane (not supported by every terminal) |
 | `Ctrl-C`   | Cancel and exit                   |
 
 ### Reading the list
@@ -95,13 +96,13 @@ The fzf browser opens with your Claude Code sessions sorted by most recent activ
 └── last activity timestamp
 ```
 
-The preview pane (toggle with `Ctrl-/`) shows the project path, timestamps, and all messages in the session.
+The preview pane (toggle with `Ctrl-O`) shows the project path, timestamps, and all messages in the session.
 
 ---
 
 ## Shell integration (recommended)
 
-By default, clauhist runs `cd` in a subshell. Therefore, you need to `exit` to return to the original directory.
+By default, clauhist resumes the session in a sub-shell running your `$SHELL` (falling back to zsh). Therefore, you need to `exit` — or run `clauhist --return` — to get back to the original directory. Both leave the sub-shell the normal way, so its shell history is written out; `clauhist --return` only works when you run it directly in the sub-shell clauhist started.
 
 To stay in the current shell and enable `cd -` to go back, add shell integration:
 
@@ -127,13 +128,16 @@ With this, selecting a session changes your current shell's directory and resume
 Install fzf: `brew install fzf` (macOS) or see the [fzf installation guide](https://github.com/junegunn/fzf#installation).
 
 **`History file not found`**
-`~/.claude/history.jsonl` does not exist yet. Start a chat in Claude Code to create it.
+`~/.claude/history.jsonl` does not exist yet. Start a chat in Claude Code to create it. The message prints the exact path clauhist looked at — if you have set `CLAUDE_CONFIG_DIR`, that is `$CLAUDE_CONFIG_DIR/history.jsonl`.
 
 **`clauhist: command not found`**
 `~/.cargo/bin` is not in your `PATH`. Add `export PATH="$HOME/.cargo/bin:$PATH"` to `.zshrc`.
 
+**`Ctrl-/` does not toggle the preview**
+fzf treats `Ctrl-/` as an alias for `Ctrl-_` (ASCII `0x1F`), and some terminals — WezTerm, for example — never emit that byte. Use `Ctrl-O` instead; it is a plain ASCII control character and works in every terminal.
+
 **Sessions marked with `✗`**
-The project directory has been deleted or moved. The session can still be resumed, but the `cd` step will fail. Claude will open in the directory where you ran `clauhist`.
+The project directory has been deleted or moved. clauhist resumes a session by `cd`-ing into its project directory first, so these sessions cannot be resumed — selecting one reports the missing directory and exits. Restore or recreate the directory at its original path to resume the session.
 
 ---
 
@@ -141,6 +145,6 @@ The project directory has been deleted or moved. The session can still be resume
 
 clauhist is a local-only tool that works entirely on your machine.
 
-- **What it reads:** `~/.claude/history.jsonl` — a local file that Claude Code stores on your machine. This file contains session metadata (session IDs, timestamps, project paths, and the first line of each user message).
+- **What it reads:** `~/.claude/history.jsonl` (or `$CLAUDE_CONFIG_DIR/history.jsonl`) — a local file that Claude Code stores on your machine. This file contains session metadata (session IDs, timestamps, project paths, and the first line of each user message).
 - **What it does NOT do:** clauhist does not access Anthropic's API or servers, and does not transmit any data externally.
 - **How it resumes sessions:** clauhist invokes `claude --resume <session-id>`, which is an [officially documented CLI command](https://docs.anthropic.com/en/docs/claude-code/cli-reference).
