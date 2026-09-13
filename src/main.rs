@@ -1184,18 +1184,19 @@ mod tests {
         );
     }
 
-    fn run_bash_wrapper_with_stub(stub_stdout: &str) -> std::process::Output {
+    fn run_bash_wrapper_with_stub(stub_stdout: &str, stub_exit: i32) -> std::process::Output {
         // Sources the generated bash wrapper, then calls `clauhist` with PATH overridden
-        // so `command clauhist` resolves to a stub that emits `stub_stdout` and exits 0.
-        // The stub also defines `cd` and `claude` as functions that just echo their args
-        // so we can observe whether the wrapper invoked them and with what.
+        // so `command clauhist` resolves to a stub that emits `stub_stdout` and exits
+        // with `stub_exit`. The stub also defines `cd` and `claude` as functions that
+        // just echo their args so we can observe whether the wrapper invoked them.
         let wrapper = run_init("bash");
         let stub_dir = unique_temp_path("bash-stub");
         std::fs::create_dir_all(&stub_dir).unwrap();
         let stub_path = stub_dir.join("clauhist");
         let stub = format!(
-            "#!/usr/bin/env bash\nprintf '%s' {}\n",
-            shell_quote(stub_stdout)
+            "#!/usr/bin/env bash\nprintf '%s' {}\nexit {}\n",
+            shell_quote(stub_stdout),
+            stub_exit
         );
         std::fs::write(&stub_path, stub).unwrap();
         std::fs::set_permissions(
@@ -1225,7 +1226,7 @@ mod tests {
 
     #[test]
     fn bash_wrapper_runs_cd_and_claude_on_two_line_output() {
-        let out = run_bash_wrapper_with_stub("/tmp/example\nabc-123\n");
+        let out = run_bash_wrapper_with_stub("/tmp/example\nabc-123\n", 0);
         let stdout = String::from_utf8_lossy(&out.stdout);
         assert!(stdout.contains("CD:-- /tmp/example"), "got: {stdout}");
         assert!(stdout.contains("CLAUDE:--resume abc-123"), "got: {stdout}");
@@ -1234,7 +1235,7 @@ mod tests {
     #[test]
     fn bash_wrapper_rejects_single_line_output() {
         // Single line is the canceled-fzf / malformed case. Wrapper must NOT cd or run claude.
-        let out = run_bash_wrapper_with_stub("only-one-line");
+        let out = run_bash_wrapper_with_stub("only-one-line", 0);
         let stdout = String::from_utf8_lossy(&out.stdout);
         assert!(!stdout.contains("CD:"), "must not cd; got: {stdout}");
         assert!(
@@ -1245,10 +1246,26 @@ mod tests {
 
     #[test]
     fn bash_wrapper_rejects_empty_output() {
-        let out = run_bash_wrapper_with_stub("");
+        let out = run_bash_wrapper_with_stub("", 0);
         let stdout = String::from_utf8_lossy(&out.stdout);
         assert!(!stdout.contains("CD:"));
         assert!(!stdout.contains("CLAUDE:"));
+    }
+
+    #[test]
+    fn bash_wrapper_rejects_failed_command() {
+        // Non-zero exit (e.g. the project directory no longer exists) must not cd
+        // or resume even if the stub printed a two-line contract.
+        let out = run_bash_wrapper_with_stub("/tmp/example\nabc-123\n", 1);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            !stdout.contains("CD:"),
+            "must not cd on failure; got: {stdout}"
+        );
+        assert!(
+            !stdout.contains("CLAUDE:"),
+            "must not resume on failure; got: {stdout}"
+        );
     }
 
     #[test]
