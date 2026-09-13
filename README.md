@@ -100,6 +100,34 @@ The preview pane (toggle with `Ctrl-O`) shows the project path, timestamps, and 
 
 ---
 
+## Multiple accounts
+
+Claude Code supports more than one account on a machine through the `CLAUDE_CONFIG_DIR` environment variable — for example a personal seat in `~/.claude` and a team seat in `~/.claude-work`. clauhist reads history from the same location, and with shell integration installed it resumes the session under that account as well. To browse and resume the team seat:
+
+```sh
+# zsh / bash
+CLAUDE_CONFIG_DIR="$HOME/.claude-work" clauhist
+```
+
+When the variable is unset or empty, clauhist reads `~/.claude` as before.
+
+A small function keeps it short:
+
+```sh
+# ~/.zshrc or ~/.bashrc
+clauhist-work() { CLAUDE_CONFIG_DIR="$HOME/.claude-work" clauhist "$@"; }
+```
+
+```fish
+# ~/.config/fish/config.fish
+function clauhist-work
+    set -lx CLAUDE_CONFIG_DIR $HOME/.claude-work
+    clauhist $argv
+end
+```
+
+---
+
 ## Shell integration (recommended)
 
 By default, clauhist resumes the session in a sub-shell running your `$SHELL` (falling back to zsh). Therefore, you need to `exit` — or run `clauhist --return` — to get back to the original directory. Both leave the sub-shell the normal way, so its shell history is written out; `clauhist --return` only works when you run it directly in the sub-shell clauhist started.
@@ -148,6 +176,6 @@ The project directory has been deleted or moved. clauhist resumes a session by `
 
 clauhist is a local-only tool that works entirely on your machine.
 
-- **What it reads:** `~/.claude/history.jsonl` (or `$CLAUDE_CONFIG_DIR/history.jsonl`) — a local file that Claude Code stores on your machine. This file contains session metadata (session IDs, timestamps, project paths, and the first line of each user message).
+- **What it reads:** `~/.claude/history.jsonl` (or `$CLAUDE_CONFIG_DIR/history.jsonl` when that variable is set) — a local file that Claude Code stores on your machine. This file contains session metadata (session IDs, timestamps, project paths, and the first line of each user message).
 - **What it does NOT do:** clauhist does not access Anthropic's API or servers, and does not transmit any data externally.
 - **How it resumes sessions:** clauhist invokes `claude --resume <session-id>`, which is an [officially documented CLI command](https://docs.anthropic.com/en/docs/claude-code/cli-reference).
