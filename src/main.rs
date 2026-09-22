@@ -310,6 +310,17 @@ fn print_contract(project: &str, session_id: &str, config_dir: Option<&str>) -> 
     }
 }
 
+/// Shown between fzf and the first frame Claude Code draws. Claude Code reads
+/// and replays the whole session transcript on `--resume`, which takes a few
+/// seconds for a long one — and by then fzf has torn its UI down, so the
+/// terminal is blank and the wait looks like a hang.
+fn loading_notice(project: &str, session_id: &str) -> String {
+    // The first UUID group is enough to recognise the session and keeps the
+    // line short next to the project path.
+    let short_id = session_id.split('-').next().unwrap_or(session_id);
+    format!("Loading session {short_id} in {project} …")
+}
+
 /// Interactive shell to hand back to after Claude exits. The generated command
 /// is run through `sh`, so any shell works as the exec target.
 fn resume_shell() -> String {
@@ -622,7 +633,11 @@ fn cmd_browse(sessions: Vec<Session>, print_mode: bool, exe_path: &str) {
         // config directory to resume under. Each shell formats its own `cd` +
         // `claude --resume` from these.
         match print_contract(project, session_id, config_dir.as_deref()) {
-            Some(out) => println!("{out}"),
+            Some(out) => {
+                // stderr: stdout is the contract the wrapper parses.
+                eprintln!("{}", loading_notice(project, session_id));
+                println!("{out}");
+            }
             None => {
                 eprintln!("Cannot resume: the project path, session id, or config directory contains a newline.");
                 std::process::exit(1);
@@ -649,6 +664,7 @@ fn cmd_browse(sessions: Vec<Session>, print_mode: bool, exe_path: &str) {
             prev_dir.as_deref(),
             depth,
         );
+        eprintln!("{}", loading_notice(project, session_id));
         if let Err(e) = Command::new("sh").arg("-c").arg(&shell_cmd).status() {
             eprintln!("Failed to start shell: {}", e);
             std::process::exit(1);
@@ -1034,6 +1050,23 @@ mod tests {
         assert_eq!(
             print_contract("/tmp/my-project", "abc-123", None).as_deref(),
             Some("/tmp/my-project\nabc-123")
+        );
+    }
+
+    #[test]
+    fn loading_notice_names_the_session_and_the_project() {
+        let notice = loading_notice("/tmp/my-project", "abc12345-6789-4def-8abc-0123456789ab");
+        assert_eq!(notice, "Loading session abc12345 in /tmp/my-project …");
+        // Only the first UUID group: the full id would push the path off-screen.
+        assert!(!notice.contains("abc12345-"), "got: {notice}");
+    }
+
+    #[test]
+    fn loading_notice_keeps_a_session_id_without_dashes_whole() {
+        let notice = loading_notice("/tmp/p", "plainid");
+        assert!(
+            notice.contains("Loading session plainid in /tmp/p"),
+            "got: {notice}"
         );
     }
 

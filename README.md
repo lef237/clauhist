@@ -75,6 +75,8 @@ clauhist
 
 The fzf browser opens with your Claude Code sessions sorted by most recent activity, across all working directories found in your history. Select a session and press `Enter` to resume it.
 
+Resuming hands the terminal to Claude Code, which replays the whole session transcript before it can draw anything — several seconds for a long session. clauhist prints the session it is handing over as it does so, so the blank terminal in between does not look like a hang.
+
 ### Key bindings
 
 | Key        | Action                            |
