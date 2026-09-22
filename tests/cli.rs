@@ -8,6 +8,7 @@
 //! it had never been built).
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const BIN: &str = env!("CARGO_BIN_EXE_clauhist");
@@ -18,14 +19,20 @@ fn home_path(relative: &str) -> String {
 }
 
 fn unique_temp_path(label: &str) -> PathBuf {
+    // Tests run in parallel and the clock can report the same nanos twice, so a
+    // counter is what actually keeps two callers apart: sharing a directory
+    // means one test deletes the stub another one is about to run.
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+
     let suffix = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
     let home = std::env::var("HOME").unwrap();
     PathBuf::from(home)
         .join("tmp")
-        .join(format!("clauhist-{label}-{suffix}"))
+        .join(format!("clauhist-{label}-{suffix}-{seq}"))
 }
 
 fn shell_quote(path: &str) -> String {

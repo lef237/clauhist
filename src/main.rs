@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::Local;
 use clap::{Parser, Subcommand};
@@ -325,6 +326,37 @@ fn shell_is_zsh(shell: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Replaces `path` in one step: write a private temporary file next to it, then
+/// rename it into place. `std::fs::write` truncates before it writes, so a
+/// reader — the zsh of a sub-shell started at the same moment, or a second
+/// clauhist run at the same depth — can otherwise catch the file empty or
+/// half-written. Errors are ignored, like the plain write it replaces: a
+/// missing prompt indicator must not stop a session from being resumed.
+fn write_atomically(path: &Path, contents: &str) {
+    // A process id alone is not unique enough: `cargo test` drives this from
+    // several threads inside one process.
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+
+    let Some(dir) = path.parent() else { return };
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("clauhist");
+    let tmp = dir.join(format!(
+        ".{name}.{}.{}.tmp",
+        std::process::id(),
+        SEQ.fetch_add(1, Ordering::Relaxed)
+    ));
+
+    if std::fs::write(&tmp, contents).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        return;
+    }
+    if std::fs::rename(&tmp, path).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+}
+
 fn setup_clauhist_zdotdir(depth: u32) -> PathBuf {
     let home = std::env::var("HOME").expect("HOME environment variable must be set");
     let dir = PathBuf::from(home)
@@ -360,8 +392,8 @@ fn setup_clauhist_zdotdir(depth: u32) -> PathBuf {
         orig = shell_quote(&orig_zdotdir),
     );
 
-    let _ = std::fs::write(dir.join(".zshenv"), zshenv);
-    let _ = std::fs::write(dir.join(".zshrc"), zshrc);
+    write_atomically(&dir.join(".zshenv"), &zshenv);
+    write_atomically(&dir.join(".zshrc"), &zshrc);
     dir
 }
 
@@ -684,14 +716,20 @@ mod tests {
     }
 
     fn unique_temp_path(label: &str) -> PathBuf {
+        // Tests run in parallel and the clock can report the same nanos twice,
+        // so a counter is what actually keeps two callers apart: sharing a
+        // directory means one test deletes it while the other still needs it.
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+
         let suffix = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
         let home = std::env::var("HOME").unwrap();
         PathBuf::from(home)
             .join("tmp")
-            .join(format!("clauhist-{label}-{suffix}"))
+            .join(format!("clauhist-{label}-{suffix}-{seq}"))
     }
 
     #[test]
@@ -1083,6 +1121,30 @@ mod tests {
         assert!(content.contains(&format!("source {}/.zshenv", shell_quote(&orig))));
         // ZDOTDIR must point back here so zsh still reads the .zshrc we generated.
         assert!(content.contains(&format!("ZDOTDIR={}", shell_quote(&dir.to_string_lossy()))));
+    }
+
+    /// Every clauhist run at the same depth writes the same two files, so a
+    /// reader must never catch one empty or half-written. Without the rename
+    /// this fails within a few iterations — and it is also what made the two
+    /// depth-1 tests above flaky under `cargo test`'s default parallelism.
+    #[test]
+    fn setup_clauhist_zdotdir_survives_concurrent_runs() {
+        let readers: Vec<_> = (0..8)
+            .map(|_| {
+                std::thread::spawn(|| {
+                    for _ in 0..25 {
+                        let dir = setup_clauhist_zdotdir(1);
+                        let zshrc = std::fs::read_to_string(dir.join(".zshrc")).unwrap();
+                        assert!(zshrc.contains("[clauhist]"), "torn .zshrc: {zshrc:?}");
+                        let zshenv = std::fs::read_to_string(dir.join(".zshenv")).unwrap();
+                        assert!(zshenv.contains("ZDOTDIR="), "torn .zshenv: {zshenv:?}");
+                    }
+                })
+            })
+            .collect();
+        for reader in readers {
+            reader.join().unwrap();
+        }
     }
 
     /// End-to-end check of the .zshenv forwarding against a real zsh.
