@@ -109,7 +109,7 @@ Claude Code supports more than one account on a machine through the `CLAUDE_CONF
 CLAUDE_CONFIG_DIR="$HOME/.claude-work" clauhist
 ```
 
-When the variable is unset or empty, clauhist reads `~/.claude` as before.
+When the variable is unset or empty, clauhist reads `~/.claude` as before, and resumes without setting `CLAUDE_CONFIG_DIR` at all — Claude Code then stays on the default profile it already uses, so you remain logged in.
 
 A small function keeps it short:
 
@@ -166,6 +166,9 @@ Install fzf: `brew install fzf` (macOS) or see the [fzf installation guide](http
 
 **`Ctrl-/` does not toggle the preview**
 fzf treats `Ctrl-/` as an alias for `Ctrl-_` (ASCII `0x1F`), and some terminals — WezTerm, for example — never emit that byte. Use `Ctrl-O` instead; it is a plain ASCII control character and works in every terminal.
+
+**Claude Code asks you to log in after resuming**
+Fixed in clauhist 1.3.1. Earlier versions always passed `CLAUDE_CONFIG_DIR` to `claude`, even when you had never set it. Claude Code reads its account from `~/.claude.json` when the variable is unset but from `$CLAUDE_CONFIG_DIR/.claude.json` when it is set, so resuming started an empty, logged-out profile. Upgrade with `cargo install clauhist`, then re-run `clauhist init <shell>` output if you paste it into your rc file literally. The stray profile it created can be removed: `rm ~/.claude/.claude.json` (only if you never set `CLAUDE_CONFIG_DIR=~/.claude` yourself).
 
 **Sessions marked with `✗`**
 The project directory has been deleted or moved. clauhist resumes a session by `cd`-ing into its project directory first, so these sessions cannot be resumed — selecting one reports the missing directory and exits. Restore or recreate the directory at its original path to resume the session.

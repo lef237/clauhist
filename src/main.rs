@@ -52,14 +52,22 @@ enum Commands {
     },
 }
 
+/// The `CLAUDE_CONFIG_DIR` the user set themselves, if any. `None` is not the
+/// same as `Some("~/.claude")`: Claude Code reads `~/.claude.json` when the
+/// variable is absent but `$CLAUDE_CONFIG_DIR/.claude.json` when it is set, so
+/// forwarding the fallback would point Claude at a file that does not exist and
+/// start it on a fresh, logged-out profile.
+fn claude_config_dir_override() -> Option<String> {
+    std::env::var("CLAUDE_CONFIG_DIR")
+        .ok()
+        .filter(|d| !d.is_empty())
+}
+
 /// Claude Code keeps its data in `~/.claude` unless `CLAUDE_CONFIG_DIR` points
 /// elsewhere. clauhist has to follow the same rule, otherwise a relocated
 /// installation looks like it has no history at all.
 fn claude_config_dir() -> PathBuf {
-    if let Some(dir) = std::env::var("CLAUDE_CONFIG_DIR")
-        .ok()
-        .filter(|d| !d.is_empty())
-    {
+    if let Some(dir) = claude_config_dir_override() {
         return PathBuf::from(dir);
     }
     let home = std::env::var("HOME").unwrap_or_else(|_| {
@@ -240,7 +248,7 @@ fn build_resume_cmd(
     project: &str,
     session_id: &str,
     shell: &str,
-    config_dir: &str,
+    config_dir: Option<&str>,
     zdotdir: Option<&str>,
     prev_dir: Option<&str>,
     depth: u32,
@@ -248,16 +256,22 @@ fn build_resume_cmd(
     // `env CLAUDE_CONFIG_DIR=... claude` rather than an inline `VAR=value`
     // prefix: the generated command is run through `sh` and the same shape is
     // built by the shell wrappers, one of which (fish) has no inline
-    // assignment. `env` is portable across all of them.
+    // assignment. `env` is portable across all of them. Without an override the
+    // prefix is dropped entirely — see `claude_config_dir_override`.
+    let config_dir_prefix = config_dir
+        .map(|d| format!("env CLAUDE_CONFIG_DIR={} ", shell_quote(d)))
+        .unwrap_or_default();
     let base = format!(
-        "cd {} && env CLAUDE_CONFIG_DIR={} claude --resume {}",
+        "cd {} && {}claude --resume {}",
         shell_quote(project),
-        shell_quote(config_dir),
+        config_dir_prefix,
         shell_quote(session_id)
     );
     // Keep the sub-shell on the same account, so a plain `claude` there
     // resolves to the config directory the session was resumed from.
-    let config_dir_env = format!("CLAUDE_CONFIG_DIR={} ", shell_quote(config_dir));
+    let config_dir_env = config_dir
+        .map(|d| format!("CLAUDE_CONFIG_DIR={} ", shell_quote(d)))
+        .unwrap_or_default();
     let zdotdir_env = zdotdir
         .map(|d| format!("ZDOTDIR={} ", shell_quote(d)))
         .unwrap_or_default();
@@ -278,15 +292,21 @@ fn build_resume_cmd(
     )
 }
 
-/// Three-line contract used by the shell wrappers: the project path, the
-/// session id, then the Claude config directory to resume under. The wrappers
-/// split on newlines, so every value must be newline-free for the contract to
-/// round-trip; returns `None` when any of them would break it.
-fn print_contract(project: &str, session_id: &str, config_dir: &str) -> Option<String> {
-    if project.contains('\n') || session_id.contains('\n') || config_dir.contains('\n') {
+/// Contract used by the shell wrappers: the project path, the session id, and —
+/// only when the user set `CLAUDE_CONFIG_DIR` — the config directory to resume
+/// under. Two lines mean "resume without setting the variable at all", which is
+/// what keeps a default installation on its usual `~/.claude.json` profile. The
+/// wrappers split on newlines, so every value must be newline-free for the
+/// contract to round-trip; returns `None` when any of them would break it.
+fn print_contract(project: &str, session_id: &str, config_dir: Option<&str>) -> Option<String> {
+    if project.contains('\n') || session_id.contains('\n') {
         return None;
     }
-    Some(format!("{project}\n{session_id}\n{config_dir}"))
+    match config_dir {
+        Some(dir) if dir.contains('\n') => None,
+        Some(dir) => Some(format!("{project}\n{session_id}\n{dir}")),
+        None => Some(format!("{project}\n{session_id}")),
+    }
 }
 
 /// Interactive shell to hand back to after Claude exits. The generated command
@@ -363,13 +383,19 @@ fn cmd_init(shell: &str) {
                 r#"clauhist() {{
     local out
     out=$(command clauhist --print "$@") || return
-    [[ "$out" == *$'\n'*$'\n'* ]] || return
+    [[ "$out" == *$'\n'* ]] || return
     local project="${{out%%$'\n'*}}"
     local rest="${{out#*$'\n'}}"
     local sid="${{rest%%$'\n'*}}"
-    local cfg="${{rest#*$'\n'}}"
+    local cfg=""
+    [[ "$rest" == *$'\n'* ]] && cfg="${{rest#*$'\n'}}"
     [[ "$cfg" != *$'\n'* ]] || return
-    cd -- "$project" && CLAUDE_CONFIG_DIR="$cfg" claude --resume "$sid"
+    cd -- "$project" || return
+    if [[ -n "$cfg" ]]; then
+        CLAUDE_CONFIG_DIR="$cfg" claude --resume "$sid"
+    else
+        claude --resume "$sid"
+    fi
 }}"#
             );
         }
@@ -377,10 +403,16 @@ fn cmd_init(shell: &str) {
             println!(
                 r#"function clauhist
     set -l out (command clauhist --print $argv)
-    if test (count $out) -ne 3
+    set -l n (count $out)
+    if test $n -lt 2 -o $n -gt 3
         return
     end
-    cd $out[1]; and env CLAUDE_CONFIG_DIR=$out[3] claude --resume $out[2]
+    cd $out[1]; or return
+    if test $n -eq 3
+        env CLAUDE_CONFIG_DIR=$out[3] claude --resume $out[2]
+    else
+        claude --resume $out[2]
+    end
 end"#
             );
         }
@@ -393,9 +425,14 @@ end"#
         return
     }}
     let lines = ($result.stdout | str trim --right | lines)
-    if ($lines | length) != 3 {{ return }}
+    let n = ($lines | length)
+    if $n < 2 or $n > 3 {{ return }}
     cd ($lines | get 0)
-    with-env {{ CLAUDE_CONFIG_DIR: ($lines | get 2) }} {{
+    if $n == 3 {{
+        with-env {{ CLAUDE_CONFIG_DIR: ($lines | get 2) }} {{
+            ^claude --resume ($lines | get 1)
+        }}
+    }} else {{
         ^claude --resume ($lines | get 1)
     }}
 }}"#
@@ -543,13 +580,16 @@ fn cmd_browse(sessions: Vec<Session>, print_mode: bool, exe_path: &str) {
         std::process::exit(1);
     }
 
-    let config_dir = claude_config_dir().to_string_lossy().into_owned();
+    // Only a real override is forwarded: a default install has to stay on the
+    // unset-variable code path, or Claude Code looks for its account in
+    // ~/.claude/.claude.json and starts logged out.
+    let config_dir = claude_config_dir_override();
 
     if print_mode {
         // Three-line contract for shell wrappers: project, session id, then the
         // config directory to resume under. Each shell formats its own `cd` +
         // `claude --resume` from these.
-        match print_contract(project, session_id, &config_dir) {
+        match print_contract(project, session_id, config_dir.as_deref()) {
             Some(out) => println!("{out}"),
             None => {
                 eprintln!("Cannot resume: the project path, session id, or config directory contains a newline.");
@@ -572,7 +612,7 @@ fn cmd_browse(sessions: Vec<Session>, print_mode: bool, exe_path: &str) {
             project,
             session_id,
             &shell,
-            &config_dir,
+            config_dir.as_deref(),
             zdotdir.as_deref(),
             prev_dir.as_deref(),
             depth,
@@ -794,7 +834,15 @@ mod tests {
         let zd = home_path("projects/zd");
         let cfg = home_path(".claude");
         let home = std::env::var("HOME").unwrap();
-        let cmd = build_resume_cmd(&p, "abc-123", "/bin/zsh", &cfg, Some(&zd), Some(&home), 1);
+        let cmd = build_resume_cmd(
+            &p,
+            "abc-123",
+            "/bin/zsh",
+            Some(cfg.as_str()),
+            Some(&zd),
+            Some(&home),
+            1,
+        );
         assert!(cmd.starts_with(&format!(
             "cd '{p}' && env CLAUDE_CONFIG_DIR='{cfg}' claude --resume 'abc-123';"
         )));
@@ -810,14 +858,30 @@ mod tests {
     #[test]
     fn build_resume_cmd_nested_depth_is_reflected() {
         let p = home_path("projects/p");
-        let cmd = build_resume_cmd(&p, "s1", "zsh", &home_path(".claude"), None, None, 3);
+        let cmd = build_resume_cmd(
+            &p,
+            "s1",
+            "zsh",
+            Some(home_path(".claude").as_str()),
+            None,
+            None,
+            3,
+        );
         assert!(cmd.contains("CLAUHIST_SHELL=3"));
     }
 
     #[test]
     fn build_resume_cmd_without_zdotdir() {
         let p = home_path("projects/my-project");
-        let cmd = build_resume_cmd(&p, "abc-123", "zsh", &home_path(".claude"), None, None, 1);
+        let cmd = build_resume_cmd(
+            &p,
+            "abc-123",
+            "zsh",
+            Some(home_path(".claude").as_str()),
+            None,
+            None,
+            1,
+        );
         assert!(cmd.contains("CLAUHIST_SHELL=1 CLAUHIST_SHELL_PID=$$ "));
         assert!(cmd.contains("exec 'zsh' -i"));
         assert!(!cmd.contains("ZDOTDIR"));
@@ -825,11 +889,22 @@ mod tests {
     }
 
     #[test]
+    fn build_resume_cmd_omits_the_env_var_without_an_override() {
+        let p = home_path("projects/my-project");
+        let cmd = build_resume_cmd(&p, "abc-123", "zsh", None, None, None, 1);
+        // Passing CLAUDE_CONFIG_DIR=~/.claude is NOT the same as leaving it
+        // unset: Claude Code would then look for the account in
+        // ~/.claude/.claude.json and start on a fresh, logged-out profile.
+        assert!(cmd.starts_with(&format!("cd '{p}' && claude --resume 'abc-123';")));
+        assert!(!cmd.contains("CLAUDE_CONFIG_DIR"));
+    }
+
+    #[test]
     fn build_resume_cmd_execs_the_users_shell() {
         let p = home_path("projects/p");
         let cfg = home_path(".claude");
         for shell in ["/opt/homebrew/bin/bash", "/usr/local/bin/fish"] {
-            let cmd = build_resume_cmd(&p, "s1", shell, &cfg, None, None, 1);
+            let cmd = build_resume_cmd(&p, "s1", shell, Some(cfg.as_str()), None, None, 1);
             assert!(cmd.contains(&format!("exec '{shell}' -i")));
         }
     }
@@ -837,7 +912,15 @@ mod tests {
     #[test]
     fn build_resume_cmd_records_the_subshell_pid() {
         let p = home_path("projects/p");
-        let cmd = build_resume_cmd(&p, "s1", "zsh", &home_path(".claude"), None, None, 1);
+        let cmd = build_resume_cmd(
+            &p,
+            "s1",
+            "zsh",
+            Some(home_path(".claude").as_str()),
+            None,
+            None,
+            1,
+        );
         // Deliberately unquoted: sh expands $$ to the PID that exec hands to the shell.
         assert!(cmd.contains("CLAUHIST_SHELL_PID=$$ "));
     }
@@ -858,7 +941,7 @@ mod tests {
             &project.to_string_lossy(),
             "s1",
             &fake_shell.to_string_lossy(),
-            &home_path(".claude"),
+            Some(home_path(".claude").as_str()),
             None,
             None,
             1,
@@ -890,7 +973,7 @@ mod tests {
             &p,
             "s1; rm -rf /",
             "zsh",
-            &home_path(".claude"),
+            Some(home_path(".claude").as_str()),
             None,
             None,
             1,
@@ -901,8 +984,18 @@ mod tests {
     #[test]
     fn print_contract_is_project_session_then_config_dir() {
         assert_eq!(
-            print_contract("/tmp/my-project", "abc-123", "/home/u/.claude").as_deref(),
+            print_contract("/tmp/my-project", "abc-123", Some("/home/u/.claude")).as_deref(),
             Some("/tmp/my-project\nabc-123\n/home/u/.claude")
+        );
+    }
+
+    #[test]
+    fn print_contract_is_two_lines_without_an_override() {
+        // No third line: the wrappers then resume without setting
+        // CLAUDE_CONFIG_DIR at all.
+        assert_eq!(
+            print_contract("/tmp/my-project", "abc-123", None).as_deref(),
+            Some("/tmp/my-project\nabc-123")
         );
     }
 
@@ -911,12 +1004,15 @@ mod tests {
         // The wrappers split on newlines, so a newline in any value would
         // silently shift the project/session/config boundary.
         assert_eq!(
-            print_contract("/tmp/a\nb", "abc-123", "/home/u/.claude"),
+            print_contract("/tmp/a\nb", "abc-123", Some("/home/u/.claude")),
             None
         );
-        assert_eq!(print_contract("/tmp/proj", "a\nb", "/home/u/.claude"), None);
         assert_eq!(
-            print_contract("/tmp/proj", "abc-123", "/home\nu/.claude"),
+            print_contract("/tmp/proj", "a\nb", Some("/home/u/.claude")),
+            None
+        );
+        assert_eq!(
+            print_contract("/tmp/proj", "abc-123", Some("/home\nu/.claude")),
             None
         );
     }
@@ -925,7 +1021,15 @@ mod tests {
     fn build_resume_cmd_quotes_prev_dir_in_message() {
         let p = home_path("projects/p");
         let prev = home_path("it's here");
-        let cmd = build_resume_cmd(&p, "s1", "zsh", &home_path(".claude"), None, Some(&prev), 1);
+        let cmd = build_resume_cmd(
+            &p,
+            "s1",
+            "zsh",
+            Some(home_path(".claude").as_str()),
+            None,
+            Some(&prev),
+            1,
+        );
         // The message is a single echo argument, so the quote in the path must be escaped.
         assert!(cmd.contains(&format!(
             "echo 'Claude session ended. Type exit or clauhist --return to go back to {}.'",
@@ -937,7 +1041,7 @@ mod tests {
     fn build_resume_cmd_quotes_project_path_and_config_dir_with_special_chars() {
         let p = home_path("projects/it's here");
         let cfg = home_path("it's/.claude-work");
-        let cmd = build_resume_cmd(&p, "sess-1", "zsh", &cfg, None, None, 1);
+        let cmd = build_resume_cmd(&p, "sess-1", "zsh", Some(cfg.as_str()), None, None, 1);
         assert!(cmd.starts_with(&format!(
             "cd {} && env CLAUDE_CONFIG_DIR={} claude --resume 'sess-1';",
             shell_quote(&p),

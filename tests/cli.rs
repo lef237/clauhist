@@ -203,8 +203,12 @@ fn cmd_init_zsh_wrapper_consumes_three_line_contract() {
         "must resume under the config directory from the contract"
     );
     assert!(
-        stdout.contains(r#"[[ "$out" == *$'\n'*$'\n'* ]] || return"#),
-        "must reject output with fewer than three lines"
+        stdout.contains(r#"if [[ -n "$cfg" ]]; then"#),
+        "must set CLAUDE_CONFIG_DIR only when the contract carried one"
+    );
+    assert!(
+        stdout.contains(r#"[[ "$out" == *$'\n'* ]] || return"#),
+        "must reject output with fewer than two lines"
     );
     assert!(
         !stdout.contains("eval"),
@@ -218,7 +222,8 @@ fn cmd_init_bash_wrapper_consumes_three_line_contract() {
     assert!(stdout.contains("--print"));
     assert!(stdout.contains(r#"cd -- "$project""#));
     assert!(stdout.contains(r#"CLAUDE_CONFIG_DIR="$cfg" claude --resume "$sid""#));
-    assert!(stdout.contains(r#"[[ "$out" == *$'\n'*$'\n'* ]] || return"#));
+    assert!(stdout.contains(r#"if [[ -n "$cfg" ]]; then"#));
+    assert!(stdout.contains(r#"[[ "$out" == *$'\n'* ]] || return"#));
     assert!(!stdout.contains("eval"));
 }
 
@@ -233,8 +238,12 @@ fn cmd_init_fish_wrapper_consumes_three_line_contract() {
         "fish has no inline assignment, so the config dir goes through env"
     );
     assert!(
-        stdout.contains("test (count $out) -ne 3"),
-        "must require exactly three lines"
+        stdout.contains("test $n -lt 2 -o $n -gt 3"),
+        "must require two or three lines"
+    );
+    assert!(
+        stdout.contains("test $n -eq 3"),
+        "must set the config dir only when the contract carried one"
     );
     assert!(!stdout.contains("eval"));
 }
@@ -258,8 +267,12 @@ fn cmd_init_nu_wrapper_consumes_three_line_contract() {
         "must resume under the config directory from the contract"
     );
     assert!(
-        stdout.contains("($lines | length) != 3"),
-        "must require exactly three lines"
+        stdout.contains("if $n < 2 or $n > 3 { return }"),
+        "must require two or three lines"
+    );
+    assert!(
+        stdout.contains("if $n == 3 {"),
+        "must set the config dir only when the contract carried one"
     );
 }
 
@@ -298,6 +311,9 @@ fn run_bash_wrapper_with_stub(stub_stdout: &str, stub_exit: i32) -> std::process
         .arg("-c")
         .arg(&script)
         .env("PATH", &path)
+        // A CLAUDE_CONFIG_DIR in the test runner's own environment would
+        // otherwise leak into the stub's output and mask a missing one.
+        .env_remove("CLAUDE_CONFIG_DIR")
         .output()
         .unwrap();
     std::fs::remove_dir_all(stub_dir).unwrap();
@@ -316,18 +332,30 @@ fn bash_wrapper_runs_cd_and_claude_on_three_line_output() {
 }
 
 #[test]
+fn bash_wrapper_resumes_without_the_env_var_on_two_line_output() {
+    // Two lines mean the user never set CLAUDE_CONFIG_DIR. Resuming must then
+    // leave it unset, so Claude Code keeps using its default ~/.claude.json
+    // profile instead of starting logged out under ~/.claude/.claude.json.
+    let out = run_bash_wrapper_with_stub("/tmp/example\nabc-123\n", 0);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("CD:-- /tmp/example"), "got: {stdout}");
+    assert!(
+        stdout.contains("CLAUDE::--resume abc-123"),
+        "must resume with CLAUDE_CONFIG_DIR unset; got: {stdout}"
+    );
+}
+
+#[test]
 fn bash_wrapper_rejects_short_output() {
-    // Fewer than three lines is the canceled-fzf / malformed case. The wrapper
-    // must NOT cd or run claude.
-    for stub in ["only-one-line", "/tmp/example\nabc-123"] {
-        let out = run_bash_wrapper_with_stub(stub, 0);
-        let stdout = String::from_utf8_lossy(&out.stdout);
-        assert!(!stdout.contains("CD:"), "must not cd; got: {stdout}");
-        assert!(
-            !stdout.contains("CLAUDE:"),
-            "must not resume; got: {stdout}"
-        );
-    }
+    // A single line is the canceled-fzf / malformed case. The wrapper must NOT
+    // cd or run claude.
+    let out = run_bash_wrapper_with_stub("only-one-line", 0);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!stdout.contains("CD:"), "must not cd; got: {stdout}");
+    assert!(
+        !stdout.contains("CLAUDE:"),
+        "must not resume; got: {stdout}"
+    );
 }
 
 #[test]
