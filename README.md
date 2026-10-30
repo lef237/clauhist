@@ -98,6 +98,7 @@ Resuming hands the terminal to Claude Code, which replays the whole session tran
 | `↑` / `↓` | Move up / down                    |
 | `Ctrl-O`   | Toggle the preview pane           |
 | `Ctrl-/`   | Toggle the preview pane (not supported by every terminal) |
+| `Ctrl-X`   | Expand the preview / restore the normal half-height layout |
 | `Ctrl-C`   | Cancel and exit                   |
 
 ### Reading the list
@@ -111,6 +112,14 @@ Resuming hands the terminal to Claude Code, which replays the whole session tran
 ```
 
 The preview pane (toggle with `Ctrl-O`) shows the project path, timestamps, and user prompts in the session. The count is the number of user prompts, for all three sources.
+
+Its top border includes a resize handle and a keyboard hint:
+
+```text
+────── ↕ Drag to resize · Ctrl-X: expand/restore ──────
+```
+
+Drag this border up or down to adjust the split. Press `Ctrl-X` to give the preview the largest space fzf allows, keeping a small area for the session list. Press `Ctrl-X` again to return to the normal 50/50 split. This also opens the preview if it is hidden.
 
 ---
 
