@@ -4,12 +4,15 @@ Browse Claude Code, Codex, and OpenCode history across working directories and r
 
 ```
 ╭───────────────────────────────────────────────────────────────────────────────────────╮
-│ Claude Code History  [Tab: switch to Codex  Enter: resume  Ctrl-O: preview]          │
+│ Claude Code History  [Tab: switch to Codex  Enter: resume  Ctrl-C: cancel]                │
 ├───────────────────────────────────────────────────────────────────────────────────────┤
 │ Search:                                                                               │
 │ > 2026-03-18 09:12  ✓ ~/projects/myapp      Tell me about Rust error handling…  (12)  │
 │   2026-03-17 22:45  ✓ ~/sandbox/api-client  Generate client from OpenAPI schema  (8)  │
 │   2026-03-17 14:30  ✗ ~/old-project         Database migration steps             (3)  │
+├────────────────── ↕ Drag to resize · Ctrl-X: expand/restore ─────────────────────────────┤
+│ Project : ~/projects/myapp                                                             │
+│ [09:12] Tell me about Rust error handling…                                              │
 ╰───────────────────────────────────────────────────────────────────────────────────────╯
 ```
 *(Example output — actual appearance depends on your terminal and fzf version)*
@@ -96,8 +99,6 @@ Resuming hands the terminal to Claude Code, which replays the whole session tran
 | `Tab`      | Cycle through Claude Code, Codex, and OpenCode |
 | Type       | Filter sessions by keyword        |
 | `↑` / `↓` | Move up / down                    |
-| `Ctrl-O`   | Toggle the preview pane           |
-| `Ctrl-/`   | Toggle the preview pane (not supported by every terminal) |
 | `Ctrl-X`   | Expand the preview / restore the normal half-height layout |
 | `Ctrl-C`   | Cancel and exit                   |
 
@@ -111,7 +112,7 @@ Resuming hands the terminal to Claude Code, which replays the whole session tran
 └── last activity timestamp
 ```
 
-The preview pane (toggle with `Ctrl-O`) shows the project path, timestamps, and user prompts in the session. The count is the number of user prompts, for all three sources.
+The browser opens with the session list above and the preview pane below, each using half of the window. The preview shows the project path, timestamps, and user prompts in the session. The count is the number of user prompts, for all three sources.
 
 Its top border includes a resize handle and a keyboard hint:
 
@@ -119,7 +120,7 @@ Its top border includes a resize handle and a keyboard hint:
 ────── ↕ Drag to resize · Ctrl-X: expand/restore ──────
 ```
 
-Drag this border up or down to adjust the split. Press `Ctrl-X` to give the preview the largest space fzf allows, keeping a small area for the session list. Press `Ctrl-X` again to return to the normal 50/50 split. This also opens the preview if it is hidden.
+Drag this border up or down to adjust the split. Press `Ctrl-X` to give the preview the largest space fzf allows, keeping a small area for the session list. Press `Ctrl-X` again to return to the normal 50/50 split. Both panes remain visible in either layout.
 
 ---
 
@@ -214,9 +215,6 @@ Press `Tab` to check the other tools. For Claude Code, check `~/.claude/history.
 
 **`clauhist: command not found`**
 `~/.cargo/bin` is not in your `PATH`. Add `export PATH="$HOME/.cargo/bin:$PATH"` to `.zshrc`.
-
-**`Ctrl-/` does not toggle the preview**
-fzf treats `Ctrl-/` as an alias for `Ctrl-_` (ASCII `0x1F`), and some terminals — WezTerm, for example — never emit that byte. Use `Ctrl-O` instead; it is a plain ASCII control character and works in every terminal.
 
 **Claude Code asks you to log in after resuming**
 Fixed in clauhist 1.4.0. Earlier versions always passed `CLAUDE_CONFIG_DIR` to `claude`, even when you had never set it. Claude Code reads its account from `~/.claude.json` when the variable is unset but from `$CLAUDE_CONFIG_DIR/.claude.json` when it is set, so resuming started an empty, logged-out profile. Upgrade with `cargo install clauhist`, then re-run `clauhist init <shell>` output if you paste it into your rc file literally. The stray profile it created can be removed: `rm ~/.claude/.claude.json` (only if you never set `CLAUDE_CONFIG_DIR=~/.claude` yourself).

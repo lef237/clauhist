@@ -709,7 +709,7 @@ fn cmd_browse(mut source: Source, print_mode: bool, exe_path: &str) {
             source.argument()
         );
         let header = format!(
-            "{} History  [Tab: switch to {}  Enter: resume  Ctrl-O: preview  Ctrl-C: cancel]{}",
+            "{} History  [Tab: switch to {}  Enter: resume  Ctrl-C: cancel]{}",
             source.name(),
             source.toggle().name(),
             if sessions.is_empty() {
@@ -723,7 +723,7 @@ fn cmd_browse(mut source: Source, print_mode: bool, exe_path: &str) {
             "--delimiter=\t".to_string(),
             "--with-nth=2,3,4,5".to_string(),
             format!("--preview={}", preview_cmd),
-            "--preview-window=down:50%:wrap:border-top".to_string(),
+            "--preview-window=down:50%:wrap:border-top:nohidden".to_string(),
             "--preview-label= ↕ Drag to resize · Ctrl-X: expand/restore ".to_string(),
             "--height=85%".to_string(),
             "--border=rounded".to_string(),
@@ -731,11 +731,6 @@ fn cmd_browse(mut source: Source, print_mode: bool, exe_path: &str) {
             "--expect=tab".to_string(),
             "--prompt=Search: ".to_string(),
             "--no-sort".to_string(),
-            // fzf treats ctrl-/ as an alias for ctrl-_ (0x1F), which some terminals
-            // (e.g. WezTerm) never emit. ctrl-o is a plain ASCII control character,
-            // so it works everywhere.
-            "--bind=ctrl-o:toggle-preview".to_string(),
-            "--bind=ctrl-/:toggle-preview".to_string(),
             // fzf clamps 99% to its largest preview while keeping the finder
             // usable. An empty alternative restores the initial 50% layout.
             "--bind=ctrl-x:change-preview-window(99%|)".to_string(),
