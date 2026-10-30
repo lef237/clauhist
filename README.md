@@ -1,10 +1,10 @@
 # clauhist
 
-Browse Claude Code history across working directories and resume sessions.
+Browse Claude Code and Codex history across working directories and resume sessions.
 
 ```
 ╭───────────────────────────────────────────────────────────────────────────────────────╮
-│ Claude Code History Browser  [Enter: resume  Ctrl-O: toggle preview  Ctrl-C: cancel]  │
+│ Claude Code History  [Tab: switch to Codex  Enter: resume  Ctrl-O: preview]          │
 ├───────────────────────────────────────────────────────────────────────────────────────┤
 │ Search:                                                                               │
 │ > 2026-03-18 09:12  ✓ ~/projects/myapp      Tell me about Rust error handling…  (12)  │
@@ -16,7 +16,7 @@ Browse Claude Code history across working directories and resume sessions.
 
 Claude Code can already resume work from the current project directory. clauhist solves a different problem: browsing the full history across all of your working directories from one place.
 
-Select a session and press `Enter` — clauhist opens `claude --resume` in the project directory. When you exit Claude, you return to your original shell.
+Press `Tab` to switch between the Claude Code and Codex screens. Select a session and press `Enter` — clauhist opens `claude --resume` or `codex resume` in the project directory.
 
 ---
 
@@ -28,6 +28,8 @@ The limitation is that this is tied to the directory you are currently in. If yo
 
 clauhist reads `~/.claude/history.jsonl` — or `$CLAUDE_CONFIG_DIR/history.jsonl` if you have moved Claude Code's config directory — shows sessions from all working directories in one `fzf` list, and lets you reopen the one you want immediately.
 
+For Codex, clauhist reads local session rollouts under `~/.codex/sessions/` (or `$CODEX_HOME/sessions/`). These contain the session's working directory, timestamps, and user prompts. Internal agent sessions and archived sessions are excluded.
+
 ---
 
 ## Requirements
@@ -36,7 +38,7 @@ clauhist reads `~/.claude/history.jsonl` — or `$CLAUDE_CONFIG_DIR/history.json
 |------------|----------|
 | [Rust](https://rustup.rs/) | Build only |
 | [fzf](https://github.com/junegunn/fzf) | **Runtime** |
-| [Claude Code](https://docs.anthropic.com/en/docs/claude-code) | **Runtime** |
+| [Claude Code](https://docs.anthropic.com/en/docs/claude-code) / [Codex CLI](https://developers.openai.com/codex/cli/) | **Runtime**, for the sessions you resume |
 
 > **Note:** fzf provides the interactive UI — clauhist will not work without it.
 
@@ -73,7 +75,15 @@ export PATH="$HOME/.cargo/bin:$PATH"
 clauhist
 ```
 
-The fzf browser opens with your Claude Code sessions sorted by most recent activity, across all working directories found in your history. Select a session and press `Enter` to resume it.
+The fzf browser opens with your Claude Code sessions sorted by most recent activity, across all working directories found in your history. Press `Tab` to switch to Codex or back to Claude Code. The active source and switching key are shown in the header. You can switch even when one source has no history.
+
+To open Codex directly:
+
+```sh
+clauhist --source codex
+```
+
+Use `clauhist --source claude` to open Claude Code explicitly. Select a session and press `Enter` to resume it with the corresponding CLI.
 
 Resuming hands the terminal to Claude Code, which replays the whole session transcript before it can draw anything — several seconds for a long session. clauhist prints the session it is handing over as it does so, so the blank terminal in between does not look like a hang.
 
@@ -82,6 +92,7 @@ Resuming hands the terminal to Claude Code, which replays the whole session tran
 | Key        | Action                            |
 |------------|-----------------------------------|
 | `Enter`    | Resume the selected session       |
+| `Tab`      | Switch between Claude Code and Codex |
 | Type       | Filter sessions by keyword        |
 | `↑` / `↓` | Move up / down                    |
 | `Ctrl-O`   | Toggle the preview pane           |
@@ -98,7 +109,7 @@ Resuming hands the terminal to Claude Code, which replays the whole session tran
 └── last activity timestamp
 ```
 
-The preview pane (toggle with `Ctrl-O`) shows the project path, timestamps, and all messages in the session.
+The preview pane (toggle with `Ctrl-O`) shows the project path, timestamps, and user prompts in the session. The count is the number of user prompts, for both sources.
 
 ---
 
@@ -130,6 +141,18 @@ end
 
 ---
 
+## Codex home directory
+
+By default, Codex history is read from `~/.codex/sessions/`. If you use a separate Codex home, set `CODEX_HOME`; the selected session is resumed with the same override:
+
+```sh
+CODEX_HOME="$HOME/.codex-work" clauhist --source codex
+```
+
+When `CODEX_HOME` is unset or empty, clauhist uses `~/.codex` and does not add an override to the resume command. Only locally saved sessions are available; remote-only conversations are not included.
+
+---
+
 ## Shell integration (recommended)
 
 By default, clauhist resumes the session in a sub-shell running your `$SHELL` (falling back to zsh). Therefore, you need to `exit` — or run `clauhist --return` — to get back to the original directory. Both leave the sub-shell the normal way, so its shell history is written out; `clauhist --return` only works when you run it directly in the sub-shell clauhist started.
@@ -151,7 +174,9 @@ source ($nu.default-config-dir | path join "clauhist.nu")
 The wrapper is regenerated on every Nushell start, so it always matches the
 installed `clauhist` — no separate step is needed after upgrading.
 
-With this, selecting a session changes your current shell's directory and resumes Claude. After Claude exits, you remain in the project directory, and `cd -` takes you back.
+With this, selecting a session changes your current shell's directory and resumes Claude Code or Codex. After it exits, you remain in the project directory, and `cd -` takes you back.
+
+After upgrading to a version with Codex support, reload your shell integration (`eval "$(clauhist init zsh)"`, or the command for your shell). Existing wrappers must be regenerated to recognize Codex selections. If you pasted the generated function into your shell configuration, replace it with the new `clauhist init <shell>` output.
 
 ---
 
@@ -160,8 +185,8 @@ With this, selecting a session changes your current shell's directory and resume
 **`fzf not found`**
 Install fzf: `brew install fzf` (macOS) or see the [fzf installation guide](https://github.com/junegunn/fzf#installation).
 
-**`History file not found`**
-`~/.claude/history.jsonl` does not exist yet. Start a chat in Claude Code to create it. The message prints the exact path clauhist looked at — if you have set `CLAUDE_CONFIG_DIR`, that is `$CLAUDE_CONFIG_DIR/history.jsonl`.
+**`No history found for this source`**
+Press `Tab` to check the other tool. For Claude Code, check `~/.claude/history.jsonl` (or `$CLAUDE_CONFIG_DIR/history.jsonl`). For Codex, check `~/.codex/sessions/` (or `$CODEX_HOME/sessions/`). Start a local session in the corresponding tool to create history.
 
 **`clauhist: command not found`**
 `~/.cargo/bin` is not in your `PATH`. Add `export PATH="$HOME/.cargo/bin:$PATH"` to `.zshrc`.
@@ -181,9 +206,9 @@ The project directory has been deleted or moved. clauhist resumes a session by `
 
 clauhist is a local-only tool that works entirely on your machine.
 
-- **What it reads:** `~/.claude/history.jsonl` (or `$CLAUDE_CONFIG_DIR/history.jsonl` when that variable is set) — a local file that Claude Code stores on your machine. This file contains session metadata (session IDs, timestamps, project paths, and the first line of each user message).
-- **What it does NOT do:** clauhist does not access Anthropic's API or servers, and does not transmit any data externally.
-- **How it resumes sessions:** clauhist invokes `claude --resume <session-id>`, which is an [officially documented CLI command](https://docs.anthropic.com/en/docs/claude-code/cli-reference).
+- **What it reads:** Claude Code's `history.jsonl` and Codex's `sessions/**/*.jsonl` under their respective configuration directories. Codex rollouts contain transcripts; clauhist displays their session metadata and user prompts.
+- **What it does NOT do:** clauhist does not call Anthropic or OpenAI APIs, and does not transmit history externally. Resuming starts the corresponding CLI, which uses its normal connection and settings.
+- **How it resumes sessions:** clauhist invokes `claude --resume <session-id>` or `codex resume <session-id>`. See the official [Claude Code CLI reference](https://docs.anthropic.com/en/docs/claude-code/cli-reference) and [Codex CLI reference](https://developers.openai.com/codex/cli/reference/#codex-resume).
 
 ---
 

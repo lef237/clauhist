@@ -29,10 +29,7 @@ fn unique_temp_path(label: &str) -> PathBuf {
         .unwrap()
         .as_nanos();
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-    let home = std::env::var("HOME").unwrap();
-    PathBuf::from(home)
-        .join("tmp")
-        .join(format!("clauhist-{label}-{suffix}-{seq}"))
+    std::env::temp_dir().join(format!("clauhist-{label}-{suffix}-{seq}"))
 }
 
 fn shell_quote(path: &str) -> String {
@@ -210,7 +207,7 @@ fn cmd_init_zsh_wrapper_consumes_three_line_contract() {
         "must resume under the config directory from the contract"
     );
     assert!(
-        stdout.contains(r#"if [[ -n "$cfg" ]]; then"#),
+        stdout.contains(r#"elif [[ -n "$cfg" ]]; then"#),
         "must set CLAUDE_CONFIG_DIR only when the contract carried one"
     );
     assert!(
@@ -229,7 +226,7 @@ fn cmd_init_bash_wrapper_consumes_three_line_contract() {
     assert!(stdout.contains("--print"));
     assert!(stdout.contains(r#"cd -- "$project""#));
     assert!(stdout.contains(r#"CLAUDE_CONFIG_DIR="$cfg" claude --resume "$sid""#));
-    assert!(stdout.contains(r#"if [[ -n "$cfg" ]]; then"#));
+    assert!(stdout.contains(r#"elif [[ -n "$cfg" ]]; then"#));
     assert!(stdout.contains(r#"[[ "$out" == *$'\n'* ]] || return"#));
     assert!(!stdout.contains("eval"));
 }
@@ -309,6 +306,7 @@ fn run_bash_wrapper_with_stub(stub_stdout: &str, stub_exit: i32) -> std::process
         "{wrapper}\n\
          cd() {{ echo CD:\"$@\"; }}\n\
          claude() {{ echo CLAUDE:\"${{CLAUDE_CONFIG_DIR}}:$@\"; }}\n\
+         codex() {{ echo CODEX:\"${{CODEX_HOME}}:$@\"; }}\n\
          clauhist\n",
     );
     let mut path = std::env::var("PATH").unwrap_or_default();
@@ -321,6 +319,7 @@ fn run_bash_wrapper_with_stub(stub_stdout: &str, stub_exit: i32) -> std::process
         // A CLAUDE_CONFIG_DIR in the test runner's own environment would
         // otherwise leak into the stub's output and mask a missing one.
         .env_remove("CLAUDE_CONFIG_DIR")
+        .env_remove("CODEX_HOME")
         .output()
         .unwrap();
     std::fs::remove_dir_all(stub_dir).unwrap();
@@ -387,4 +386,181 @@ fn bash_wrapper_rejects_failed_command() {
         !stdout.contains("CLAUDE:"),
         "must not resume on failure; got: {stdout}"
     );
+}
+
+fn write_executable(path: &std::path::Path, contents: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::write(path, contents).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+fn write_codex_session(config: &std::path::Path, project: &str) {
+    let dir = config.join("sessions/2026/10/30");
+    std::fs::create_dir_all(&dir).unwrap();
+    let lines = [
+        serde_json::json!({"timestamp":"2026-10-30T01:00:00Z", "type":"session_meta",
+            "payload":{"id":"codex-123", "cwd":project, "timestamp":"2026-10-30T01:00:00Z", "source":"cli"}}),
+        serde_json::json!({"timestamp":"2026-10-30T01:01:00Z", "type":"event_msg",
+            "payload":{"type":"user_message", "message":"日本語の Codex 履歴"}}),
+        serde_json::json!({"timestamp":"2026-10-30T01:02:00Z", "type":"event_msg",
+            "payload":{"type":"agent_message", "message":"done"}}),
+    ];
+    std::fs::write(
+        dir.join("rollout-2026-10-30-codex-123.jsonl"),
+        lines.iter().map(|v| format!("{v}\n")).collect::<String>(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn codex_preview_reads_rollouts_with_and_without_codex_home_override() {
+    let root = unique_temp_path("codex-preview");
+    let config = root.join(".codex");
+    write_codex_session(&config, "/tmp/project with spaces");
+    for home_override in [None, Some(""), Some(config.to_str().unwrap())] {
+        let mut cmd = std::process::Command::new(BIN);
+        cmd.args(["preview", "codex-123", "--source", "codex"])
+            .env("HOME", &root);
+        match home_override {
+            Some(value) => cmd.env("CODEX_HOME", value),
+            None => cmd.env_remove("CODEX_HOME"),
+        };
+        let output = cmd.output().unwrap();
+        assert!(output.status.success());
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("Project : /tmp/project with spaces"),
+            "{stdout}"
+        );
+        assert!(stdout.contains("日本語の Codex 履歴"), "{stdout}");
+        assert!(stdout.contains("Messages: 1"), "{stdout}");
+        assert!(
+            !stdout.contains("done"),
+            "preview shows user prompts like Claude's preview"
+        );
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn browser_switches_from_empty_claude_history_to_codex_and_preserves_resume_target() {
+    let root = unique_temp_path("switch");
+    let config = root.join("codex config");
+    let project = root.join(" ✓ project's directory");
+    let bin = root.join("bin");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::create_dir_all(&bin).unwrap();
+    write_codex_session(&config, project.to_str().unwrap());
+    // Real fzf emits an expected key even if its empty selection exits with 1.
+    write_executable(
+        &bin.join("fzf"),
+        &format!(
+            r#"#!/bin/sh
+if [ "$1" = --version ]; then exit 0; fi
+printf '%s\n' "$@" >> {args}
+if [ ! -f {state} ]; then
+    cat > /dev/null
+    touch {state}
+    printf 'tab\n'
+    exit 1
+fi
+printf '\n'
+head -n 1
+"#,
+            args = shell_quote(root.join("args").to_str().unwrap()),
+            state = shell_quote(root.join("state").to_str().unwrap())
+        ),
+    );
+    let output = std::process::Command::new(BIN)
+        .arg("--print")
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .env("CLAUDE_CONFIG_DIR", root.join("no-claude-history"))
+        .env("CODEX_HOME", &config)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!(
+            "clauhist:codex\n{}\ncodex-123\n{}\n",
+            project.display(),
+            config.display()
+        )
+    );
+    let args = std::fs::read_to_string(root.join("args")).unwrap();
+    assert!(args.contains("--expect=tab"));
+    assert!(!args.contains("--expect=ctrl-s"));
+    assert!(args.contains("Claude Code History"));
+    assert!(args.contains("No history found for this source"));
+    assert!(args.contains("Codex History"));
+    assert!(args.contains("--source codex preview {1}"));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn bash_wrapper_resumes_codex_with_optional_config_and_quotes_values() {
+    for config in [None, Some("/tmp/Codex's config $value")] {
+        let contract = format!(
+            "clauhist:codex\n/tmp/project's directory\ncodex-123{}\n",
+            config.map(|cfg| format!("\n{cfg}")).unwrap_or_default()
+        );
+        let output = run_bash_wrapper_with_stub(&contract, 0);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains("CD:-- /tmp/project's directory"),
+            "{stdout}"
+        );
+        assert!(
+            stdout.contains(&format!("CODEX:{}:resume codex-123", config.unwrap_or(""))),
+            "{stdout}"
+        );
+        assert!(!stdout.contains("CLAUDE:"), "{stdout}");
+    }
+}
+
+#[test]
+fn browser_resumes_codex_in_its_project_without_shell_integration() {
+    let root = unique_temp_path("codex-resume");
+    let config = root.join("Codex's config");
+    let project = root.join("project with spaces");
+    let bin = root.join("bin");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::create_dir_all(&bin).unwrap();
+    write_codex_session(&config, project.to_str().unwrap());
+    write_executable(
+        &bin.join("fzf"),
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then exit 0; fi\nprintf '\\n'\nhead -n 1\n",
+    );
+    write_executable(
+        &bin.join("codex"),
+        "#!/bin/sh\nprintf '%s\\n' \"$PWD\" \"$CODEX_HOME\" \"$@\" > \"$RESUME_LOG\"\n",
+    );
+    write_executable(&bin.join("test-shell"), "#!/bin/sh\nexit 0\n");
+    let output = std::process::Command::new(BIN)
+        .args(["--source", "codex"])
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .env("CODEX_HOME", &config)
+        .env("SHELL", bin.join("test-shell"))
+        .env("RESUME_LOG", root.join("resumed"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("resumed")).unwrap(),
+        format!(
+            "{}\n{}\nresume\ncodex-123\n",
+            project.display(),
+            config.display()
+        )
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("Codex session ended."));
+    std::fs::remove_dir_all(root).unwrap();
 }

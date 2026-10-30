@@ -5,8 +5,68 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::Local;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use serde::Deserialize;
+
+mod codex;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
+enum Source {
+    #[default]
+    Claude,
+    Codex,
+}
+
+impl Source {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Claude => "Claude Code",
+            Self::Codex => "Codex",
+        }
+    }
+
+    fn argument(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+        }
+    }
+
+    fn toggle(self) -> Self {
+        match self {
+            Self::Claude => Self::Codex,
+            Self::Codex => Self::Claude,
+        }
+    }
+
+    fn config_override(self) -> Option<String> {
+        match self {
+            Self::Claude => claude_config_dir_override(),
+            Self::Codex => std::env::var("CODEX_HOME").ok().filter(|d| !d.is_empty()),
+        }
+    }
+
+    fn config_var(self) -> &'static str {
+        match self {
+            Self::Claude => "CLAUDE_CONFIG_DIR",
+            Self::Codex => "CODEX_HOME",
+        }
+    }
+
+    fn resume_command(self) -> &'static str {
+        match self {
+            Self::Claude => "claude --resume",
+            Self::Codex => "codex resume",
+        }
+    }
+
+    fn sessions(self) -> Vec<Session> {
+        match self {
+            Self::Claude => build_sessions(parse_sessions(&read_history())),
+            Self::Codex => codex::read_sessions(&codex::config_dir(), None),
+        }
+    }
+}
 
 #[derive(Debug, Deserialize, Clone)]
 struct HistoryEntry {
@@ -30,13 +90,16 @@ struct Session {
 #[command(
     name = "clauhist",
     version,
-    about = "Browse Claude Code history across working directories and resume sessions"
+    about = "Browse Claude Code and Codex history across working directories and resume sessions"
 )]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
     #[arg(long, hide = true)]
     print: bool,
+    /// History to open initially (Tab switches inside the browser)
+    #[arg(long, value_enum, default_value = "claude", global = true)]
+    source: Source,
     /// Exit the clauhist sub-shell and return to the original shell
     #[arg(long = "return")]
     return_flag: bool,
@@ -150,7 +213,7 @@ fn build_sessions(raw: HashMap<String, Vec<HistoryEntry>>) -> Vec<Session> {
         .into_iter()
         .map(|(session_id, entries)| build_session(session_id, entries))
         .collect();
-    sessions.sort_by(|a, b| b.last_ts.cmp(&a.last_ts));
+    sessions.sort_by_key(|s| std::cmp::Reverse(s.last_ts));
     sessions
 }
 
@@ -249,7 +312,7 @@ fn build_resume_cmd(
     project: &str,
     session_id: &str,
     shell: &str,
-    config_dir: Option<&str>,
+    source_config: (Source, Option<&str>),
     zdotdir: Option<&str>,
     prev_dir: Option<&str>,
     depth: u32,
@@ -259,11 +322,14 @@ fn build_resume_cmd(
     // built by the shell wrappers, one of which (fish) has no inline
     // assignment. `env` is portable across all of them. Without an override the
     // prefix is dropped entirely — see `claude_config_dir_override`.
+    let (source, config_dir) = source_config;
+    let config_var = source.config_var();
+    let resume = source.resume_command();
     let config_dir_prefix = config_dir
-        .map(|d| format!("env CLAUDE_CONFIG_DIR={} ", shell_quote(d)))
+        .map(|d| format!("env {config_var}={} ", shell_quote(d)))
         .unwrap_or_default();
     let base = format!(
-        "cd {} && {}claude --resume {}",
+        "cd {} && {}{resume} {}",
         shell_quote(project),
         config_dir_prefix,
         shell_quote(session_id)
@@ -271,7 +337,7 @@ fn build_resume_cmd(
     // Keep the sub-shell on the same account, so a plain `claude` there
     // resolves to the config directory the session was resumed from.
     let config_dir_env = config_dir
-        .map(|d| format!("CLAUDE_CONFIG_DIR={} ", shell_quote(d)))
+        .map(|d| format!("{config_var}={} ", shell_quote(d)))
         .unwrap_or_default();
     let zdotdir_env = zdotdir
         .map(|d| format!("ZDOTDIR={} ", shell_quote(d)))
@@ -282,7 +348,10 @@ fn build_resume_cmd(
     let back_msg = prev_dir
         .map(|d| format!("Type exit or clauhist --return to go back to {d}."))
         .unwrap_or_else(|| "Type exit or clauhist --return to go back.".to_string());
-    let ended_msg = shell_quote(&format!("Claude session ended. {back_msg}"));
+    let ended_msg = shell_quote(&format!(
+        "{} session ended. {back_msg}",
+        source.name().trim_end_matches(" Code")
+    ));
     // `$$` is the PID of the `sh` running this command, and `exec` keeps it,
     // so the interactive shell ends up recording its own PID. `clauhist
     // --return` checks it before signalling anything.
@@ -299,6 +368,8 @@ fn build_resume_cmd(
 /// what keeps a default installation on its usual `~/.claude.json` profile. The
 /// wrappers split on newlines, so every value must be newline-free for the
 /// contract to round-trip; returns `None` when any of them would break it.
+/// Codex selections prepend a `clauhist:codex` marker to this payload; their
+/// optional config directory is CODEX_HOME instead of CLAUDE_CONFIG_DIR.
 fn print_contract(project: &str, session_id: &str, config_dir: Option<&str>) -> Option<String> {
     if project.contains('\n') || session_id.contains('\n') {
         return None;
@@ -374,6 +445,10 @@ fn setup_clauhist_zdotdir(depth: u32) -> PathBuf {
         .join(".cache")
         .join("clauhist")
         .join(format!("zdotdir-{depth}"));
+    write_clauhist_zdotdir(dir, depth)
+}
+
+fn write_clauhist_zdotdir(dir: PathBuf, depth: u32) -> PathBuf {
     let _ = std::fs::create_dir_all(&dir);
 
     let orig_zdotdir =
@@ -426,6 +501,11 @@ fn cmd_init(shell: &str) {
                 r#"clauhist() {{
     local out
     out=$(command clauhist --print "$@") || return
+    local source="claude"
+    if [[ "$out" == clauhist:codex$'\n'* ]]; then
+        source="codex"
+        out="${{out#*$'\n'}}"
+    fi
     [[ "$out" == *$'\n'* ]] || return
     local project="${{out%%$'\n'*}}"
     local rest="${{out#*$'\n'}}"
@@ -434,7 +514,13 @@ fn cmd_init(shell: &str) {
     [[ "$rest" == *$'\n'* ]] && cfg="${{rest#*$'\n'}}"
     [[ "$cfg" != *$'\n'* ]] || return
     cd -- "$project" || return
-    if [[ -n "$cfg" ]]; then
+    if [[ "$source" == "codex" ]]; then
+        if [[ -n "$cfg" ]]; then
+            CODEX_HOME="$cfg" codex resume "$sid"
+        else
+            codex resume "$sid"
+        fi
+    elif [[ -n "$cfg" ]]; then
         CLAUDE_CONFIG_DIR="$cfg" claude --resume "$sid"
     else
         claude --resume "$sid"
@@ -446,12 +532,25 @@ fn cmd_init(shell: &str) {
             println!(
                 r#"function clauhist
     set -l out (command clauhist --print $argv)
+    set -l result $status
+    test $result -eq 0; or return $result
+    set -l source claude
+    if test (count $out) -gt 0; and test "$out[1]" = clauhist:codex
+        set source codex
+        set -e out[1]
+    end
     set -l n (count $out)
     if test $n -lt 2 -o $n -gt 3
         return
     end
     cd $out[1]; or return
-    if test $n -eq 3
+    if test "$source" = codex
+        if test $n -eq 3
+            env CODEX_HOME=$out[3] codex resume $out[2]
+        else
+            codex resume $out[2]
+        end
+    else if test $n -eq 3
         env CLAUDE_CONFIG_DIR=$out[3] claude --resume $out[2]
     else
         claude --resume $out[2]
@@ -467,11 +566,21 @@ end"#
         print --stderr $result.stderr
         return
     }}
-    let lines = ($result.stdout | str trim --right | lines)
+    let raw = ($result.stdout | str trim --right | lines)
+    let is_codex = (($raw | first 1) == ["clauhist:codex"])
+    let lines = (if $is_codex {{ $raw | skip 1 }} else {{ $raw }})
     let n = ($lines | length)
     if $n < 2 or $n > 3 {{ return }}
     cd ($lines | get 0)
-    if $n == 3 {{
+    if $is_codex {{
+        if $n == 3 {{
+            with-env {{ CODEX_HOME: ($lines | get 2) }} {{
+                ^codex resume ($lines | get 1)
+            }}
+        }} else {{
+            ^codex resume ($lines | get 1)
+        }}
+    }} else if $n == 3 {{
         with-env {{ CLAUDE_CONFIG_DIR: ($lines | get 2) }} {{
             ^claude --resume ($lines | get 1)
         }}
@@ -541,134 +650,162 @@ fn cmd_return() {
     std::process::exit(0);
 }
 
-fn cmd_browse(sessions: Vec<Session>, print_mode: bool, exe_path: &str) {
+fn cmd_browse(mut source: Source, print_mode: bool, exe_path: &str) {
     if !fzf_is_available() {
         eprintln!("fzf not found. Install with: brew install fzf");
         std::process::exit(1);
     }
 
-    let lines = format_for_fzf(&sessions);
-    let fzf_input = lines.join("\n");
-    let preview_cmd = format!("{} preview {{1}}", shell_quote(exe_path));
-
-    let fzf_args: Vec<String> = vec![
-        "--delimiter=\t".to_string(),
-        "--with-nth=2,3,4,5".to_string(),
-        format!("--preview={}", preview_cmd),
-        "--preview-window=down:50%:wrap".to_string(),
-        "--height=85%".to_string(),
-        "--border=rounded".to_string(),
-        "--header=Claude Code History Browser  [Enter: resume  Ctrl-O: toggle preview  Ctrl-C: cancel]"
-            .to_string(),
-        "--prompt=Search: ".to_string(),
-        "--no-sort".to_string(),
-        // fzf treats ctrl-/ as an alias for ctrl-_ (0x1F), which some terminals
-        // (e.g. WezTerm) never emit. ctrl-o is a plain ASCII control character,
-        // so it works everywhere.
-        "--bind=ctrl-o:toggle-preview".to_string(),
-        "--bind=ctrl-/:toggle-preview".to_string(),
-    ];
-
-    let mut child = match Command::new("fzf")
-        .args(&fzf_args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit())
-        .spawn()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("Failed to spawn fzf: {}", e);
-            std::process::exit(1);
-        }
-    };
-
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(fzf_input.as_bytes());
-    }
-
-    let output = match child.wait_with_output() {
-        Ok(o) => o,
-        Err(e) => {
-            eprintln!("fzf error: {}", e);
-            std::process::exit(1);
-        }
-    };
-
-    // Exit cleanly on Ctrl-C (130), no-match (1), or any cancellation
-    if !output.status.success() {
-        std::process::exit(0);
-    }
-
-    let line = String::from_utf8_lossy(&output.stdout);
-    let line = line.trim();
-    if line.is_empty() {
-        std::process::exit(0);
-    }
-
-    let fields: Vec<&str> = line.splitn(5, '\t').collect();
-    if fields.len() < 3 {
-        eprintln!("Unexpected fzf output format");
-        std::process::exit(1);
-    }
-
-    let session_id = fields[0];
-    let project = fields[2].trim_start_matches(['✓', '✗', ' ']);
-
-    // The resume command is `cd <project> && claude --resume <id>`, so a missing
-    // directory means claude never starts. Say so instead of failing silently.
-    if !std::path::Path::new(project).exists() {
-        eprintln!("Project directory no longer exists: {}", project);
-        eprintln!("Sessions marked ✗ cannot be resumed.");
-        std::process::exit(1);
-    }
-
-    // Only a real override is forwarded: a default install has to stay on the
-    // unset-variable code path, or Claude Code looks for its account in
-    // ~/.claude/.claude.json and starts logged out.
-    let config_dir = claude_config_dir_override();
-
-    if print_mode {
-        // Three-line contract for shell wrappers: project, session id, then the
-        // config directory to resume under. Each shell formats its own `cd` +
-        // `claude --resume` from these.
-        match print_contract(project, session_id, config_dir.as_deref()) {
-            Some(out) => {
-                // stderr: stdout is the contract the wrapper parses.
-                eprintln!("{}", loading_notice(project, session_id));
-                println!("{out}");
+    loop {
+        let sessions = source.sessions();
+        let lines = format_for_fzf(&sessions);
+        let fzf_input = lines.join("\n");
+        let preview_cmd = format!(
+            "{} --source {} preview {{1}}",
+            shell_quote(exe_path),
+            source.argument()
+        );
+        let header = format!(
+            "{} History  [Tab: switch to {}  Enter: resume  Ctrl-O: preview  Ctrl-C: cancel]{}",
+            source.name(),
+            source.toggle().name(),
+            if sessions.is_empty() {
+                "\nNo history found for this source. Press Tab to switch."
+            } else {
+                ""
             }
-            None => {
-                eprintln!("Cannot resume: the project path, session id, or config directory contains a newline.");
+        );
+
+        let fzf_args: Vec<String> = vec![
+            "--delimiter=\t".to_string(),
+            "--with-nth=2,3,4,5".to_string(),
+            format!("--preview={}", preview_cmd),
+            "--preview-window=down:50%:wrap".to_string(),
+            "--height=85%".to_string(),
+            "--border=rounded".to_string(),
+            format!("--header={header}"),
+            "--expect=tab".to_string(),
+            "--prompt=Search: ".to_string(),
+            "--no-sort".to_string(),
+            // fzf treats ctrl-/ as an alias for ctrl-_ (0x1F), which some terminals
+            // (e.g. WezTerm) never emit. ctrl-o is a plain ASCII control character,
+            // so it works everywhere.
+            "--bind=ctrl-o:toggle-preview".to_string(),
+            "--bind=ctrl-/:toggle-preview".to_string(),
+        ];
+
+        let mut child = match Command::new("fzf")
+            .args(&fzf_args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("Failed to spawn fzf: {}", e);
+                std::process::exit(1);
+            }
+        };
+
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(fzf_input.as_bytes());
+        }
+
+        let output = match child.wait_with_output() {
+            Ok(o) => o,
+            Err(e) => {
+                eprintln!("fzf error: {}", e);
+                std::process::exit(1);
+            }
+        };
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let mut output_lines = stdout.lines();
+        if output_lines.next() == Some("tab") {
+            source = source.toggle();
+            continue;
+        }
+        // fzf emits the expected key first (an empty line for Enter). Even with
+        // no selection Tab must switch, so check that before the exit status.
+        if !output.status.success() {
+            match output.status.code() {
+                Some(1 | 130) => return,
+                _ => {
+                    eprintln!("fzf failed: {}", output.status);
+                    std::process::exit(1);
+                }
+            }
+        }
+        let Some(line) = output_lines.next().filter(|line| !line.is_empty()) else {
+            return;
+        };
+        // Resolve the selection against our data rather than trusting the display
+        // path: spaces, checkmarks, and tabs are valid characters in directory names.
+        let session_id = line.split('\t').next().unwrap_or_default();
+        let Some(session) = sessions.iter().find(|s| s.session_id == session_id) else {
+            eprintln!("Unexpected fzf output format");
+            std::process::exit(1);
+        };
+        let project = session.project.as_str();
+
+        // Both tools resume in the selected working directory.
+        if !std::path::Path::new(project).is_dir() {
+            eprintln!("Project directory no longer exists: {}", project);
+            eprintln!("Sessions marked ✗ cannot be resumed.");
+            std::process::exit(1);
+        }
+
+        // Only a real override is forwarded: a default install has to stay on the
+        // unset-variable code path, or Claude Code looks for its account in
+        // ~/.claude/.claude.json and starts logged out.
+        let config_dir = source.config_override();
+
+        if print_mode {
+            // Keep Claude's existing payload, with a marker for Codex selections.
+            // Each wrapper formats its own cd and resume command from these values.
+            match print_contract(project, session_id, config_dir.as_deref()) {
+                Some(out) => {
+                    // stderr: stdout is the contract the wrapper parses.
+                    eprintln!("{}", loading_notice(project, session_id));
+                    if source == Source::Codex {
+                        println!("clauhist:codex");
+                    }
+                    println!("{out}");
+                }
+                None => {
+                    eprintln!("Cannot resume: the project path, session id, or config directory contains a newline.");
+                    std::process::exit(1);
+                }
+            }
+        } else {
+            let depth = clauhist_depth() + 1;
+            let shell = resume_shell();
+            // The prompt indicator is a zsh-only trick; other shells get a plain sub-shell.
+            let zdotdir = if shell_is_zsh(&shell) {
+                Some(setup_clauhist_zdotdir(depth).to_string_lossy().into_owned())
+            } else {
+                None
+            };
+            let prev_dir = std::env::current_dir()
+                .map(|p| p.to_string_lossy().into_owned())
+                .ok();
+            let shell_cmd = build_resume_cmd(
+                project,
+                session_id,
+                &shell,
+                (source, config_dir.as_deref()),
+                zdotdir.as_deref(),
+                prev_dir.as_deref(),
+                depth,
+            );
+            eprintln!("{}", loading_notice(project, session_id));
+            if let Err(e) = Command::new("sh").arg("-c").arg(&shell_cmd).status() {
+                eprintln!("Failed to start shell: {}", e);
                 std::process::exit(1);
             }
         }
-    } else {
-        let depth = clauhist_depth() + 1;
-        let shell = resume_shell();
-        // The prompt indicator is a zsh-only trick; other shells get a plain sub-shell.
-        let zdotdir = if shell_is_zsh(&shell) {
-            Some(setup_clauhist_zdotdir(depth).to_string_lossy().into_owned())
-        } else {
-            None
-        };
-        let prev_dir = std::env::current_dir()
-            .map(|p| p.to_string_lossy().into_owned())
-            .ok();
-        let shell_cmd = build_resume_cmd(
-            project,
-            session_id,
-            &shell,
-            config_dir.as_deref(),
-            zdotdir.as_deref(),
-            prev_dir.as_deref(),
-            depth,
-        );
-        eprintln!("{}", loading_notice(project, session_id));
-        if let Err(e) = Command::new("sh").arg("-c").arg(&shell_cmd).status() {
-            eprintln!("Failed to start shell: {}", e);
-            std::process::exit(1);
-        }
+        return;
     }
 }
 
@@ -688,21 +825,20 @@ fn main() {
         Some(Commands::Init { shell }) => {
             cmd_init(&shell);
         }
-        Some(Commands::Preview { session_id }) => {
-            cmd_preview(&session_id, &read_history());
-        }
-        None => {
-            let sessions = build_sessions(parse_sessions(&read_history()));
-            if sessions.is_empty() {
-                let path = history_file();
-                if !path.exists() {
-                    eprintln!("History file not found: {}", path.display());
+        Some(Commands::Preview { session_id }) => match cli.source {
+            Source::Claude => cmd_preview(&session_id, &read_history()),
+            Source::Codex => {
+                if let Some(session) =
+                    codex::read_sessions(&codex::config_dir(), Some(&session_id)).first()
+                {
+                    print!("{}", render_preview(session));
                 } else {
-                    eprintln!("No history found");
+                    println!("Session not found: {session_id}");
                 }
-                std::process::exit(1);
             }
-            cmd_browse(sessions, cli.print, &exe_path);
+        },
+        None => {
+            cmd_browse(cli.source, cli.print, &exe_path);
         }
     }
 }
@@ -742,10 +878,14 @@ mod tests {
             .unwrap()
             .as_nanos();
         let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-        let home = std::env::var("HOME").unwrap();
-        PathBuf::from(home)
-            .join("tmp")
-            .join(format!("clauhist-{label}-{suffix}-{seq}"))
+        std::env::temp_dir().join(format!("clauhist-{label}-{suffix}-{seq}"))
+    }
+
+    // Exercise the shared per-depth cache without changing the user's cache.
+    fn setup_clauhist_zdotdir(depth: u32) -> PathBuf {
+        static ROOT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+        let root = ROOT.get_or_init(|| unique_temp_path("cache"));
+        write_clauhist_zdotdir(root.join(format!("zdotdir-{depth}")), depth)
     }
 
     #[test]
@@ -892,7 +1032,7 @@ mod tests {
             &p,
             "abc-123",
             "/bin/zsh",
-            Some(cfg.as_str()),
+            (Source::Claude, Some(cfg.as_str())),
             Some(&zd),
             Some(&home),
             1,
@@ -916,7 +1056,7 @@ mod tests {
             &p,
             "s1",
             "zsh",
-            Some(home_path(".claude").as_str()),
+            (Source::Claude, Some(home_path(".claude").as_str())),
             None,
             None,
             3,
@@ -931,7 +1071,7 @@ mod tests {
             &p,
             "abc-123",
             "zsh",
-            Some(home_path(".claude").as_str()),
+            (Source::Claude, Some(home_path(".claude").as_str())),
             None,
             None,
             1,
@@ -945,7 +1085,7 @@ mod tests {
     #[test]
     fn build_resume_cmd_omits_the_env_var_without_an_override() {
         let p = home_path("projects/my-project");
-        let cmd = build_resume_cmd(&p, "abc-123", "zsh", None, None, None, 1);
+        let cmd = build_resume_cmd(&p, "abc-123", "zsh", (Source::Claude, None), None, None, 1);
         // Passing CLAUDE_CONFIG_DIR=~/.claude is NOT the same as leaving it
         // unset: Claude Code would then look for the account in
         // ~/.claude/.claude.json and start on a fresh, logged-out profile.
@@ -958,7 +1098,15 @@ mod tests {
         let p = home_path("projects/p");
         let cfg = home_path(".claude");
         for shell in ["/opt/homebrew/bin/bash", "/usr/local/bin/fish"] {
-            let cmd = build_resume_cmd(&p, "s1", shell, Some(cfg.as_str()), None, None, 1);
+            let cmd = build_resume_cmd(
+                &p,
+                "s1",
+                shell,
+                (Source::Claude, Some(cfg.as_str())),
+                None,
+                None,
+                1,
+            );
             assert!(cmd.contains(&format!("exec '{shell}' -i")));
         }
     }
@@ -970,7 +1118,7 @@ mod tests {
             &p,
             "s1",
             "zsh",
-            Some(home_path(".claude").as_str()),
+            (Source::Claude, Some(home_path(".claude").as_str())),
             None,
             None,
             1,
@@ -995,7 +1143,7 @@ mod tests {
             &project.to_string_lossy(),
             "s1",
             &fake_shell.to_string_lossy(),
-            Some(home_path(".claude").as_str()),
+            (Source::Claude, Some(home_path(".claude").as_str())),
             None,
             None,
             1,
@@ -1027,7 +1175,7 @@ mod tests {
             &p,
             "s1; rm -rf /",
             "zsh",
-            Some(home_path(".claude").as_str()),
+            (Source::Claude, Some(home_path(".claude").as_str())),
             None,
             None,
             1,
@@ -1096,7 +1244,7 @@ mod tests {
             &p,
             "s1",
             "zsh",
-            Some(home_path(".claude").as_str()),
+            (Source::Claude, Some(home_path(".claude").as_str())),
             None,
             Some(&prev),
             1,
@@ -1112,7 +1260,15 @@ mod tests {
     fn build_resume_cmd_quotes_project_path_and_config_dir_with_special_chars() {
         let p = home_path("projects/it's here");
         let cfg = home_path("it's/.claude-work");
-        let cmd = build_resume_cmd(&p, "sess-1", "zsh", Some(cfg.as_str()), None, None, 1);
+        let cmd = build_resume_cmd(
+            &p,
+            "sess-1",
+            "zsh",
+            (Source::Claude, Some(cfg.as_str())),
+            None,
+            None,
+            1,
+        );
         assert!(cmd.starts_with(&format!(
             "cd {} && env CLAUDE_CONFIG_DIR={} claude --resume 'sess-1';",
             shell_quote(&p),
