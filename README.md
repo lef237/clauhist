@@ -1,6 +1,6 @@
 # clauhist
 
-Browse Claude Code and Codex history across working directories and resume sessions.
+Browse Claude Code, Codex, and OpenCode history across working directories and resume sessions.
 
 ```
 ╭───────────────────────────────────────────────────────────────────────────────────────╮
@@ -16,7 +16,7 @@ Browse Claude Code and Codex history across working directories and resume sessi
 
 Claude Code can already resume work from the current project directory. clauhist solves a different problem: browsing the full history across all of your working directories from one place.
 
-Press `Tab` to switch between the Claude Code and Codex screens. Select a session and press `Enter` — clauhist opens `claude --resume` or `codex resume` in the project directory.
+Press `Tab` to cycle through the Claude Code, Codex, and OpenCode screens. Select a session and press `Enter` — clauhist opens `claude --resume`, `codex resume`, or `opencode --session` in the project directory.
 
 ---
 
@@ -38,7 +38,7 @@ For Codex, clauhist reads local session rollouts under `~/.codex/sessions/` (or 
 |------------|----------|
 | [Rust](https://rustup.rs/) | Build only |
 | [fzf](https://github.com/junegunn/fzf) | **Runtime** |
-| [Claude Code](https://docs.anthropic.com/en/docs/claude-code) / [Codex CLI](https://developers.openai.com/codex/cli/) | **Runtime**, for the sessions you resume |
+| [Claude Code](https://docs.anthropic.com/en/docs/claude-code) / [Codex CLI](https://developers.openai.com/codex/cli/) / [OpenCode](https://opencode.ai/docs/cli/) | **Runtime**, for the sessions you resume |
 
 > **Note:** fzf provides the interactive UI — clauhist will not work without it.
 
@@ -75,12 +75,13 @@ export PATH="$HOME/.cargo/bin:$PATH"
 clauhist
 ```
 
-The fzf browser opens with your Claude Code sessions sorted by most recent activity, across all working directories found in your history. Press `Tab` to switch to Codex or back to Claude Code. The active source and switching key are shown in the header. You can switch even when one source has no history.
+The fzf browser opens with your Claude Code sessions sorted by most recent activity, across all working directories found in your history. Press `Tab` to cycle through Claude Code → Codex → OpenCode → Claude Code. The active source and switching key are shown in the header. You can switch even when one source has no history.
 
-To open Codex directly:
+To open Codex or OpenCode directly:
 
 ```sh
 clauhist --source codex
+clauhist --source opencode
 ```
 
 Use `clauhist --source claude` to open Claude Code explicitly. Select a session and press `Enter` to resume it with the corresponding CLI.
@@ -92,7 +93,7 @@ Resuming hands the terminal to Claude Code, which replays the whole session tran
 | Key        | Action                            |
 |------------|-----------------------------------|
 | `Enter`    | Resume the selected session       |
-| `Tab`      | Switch between Claude Code and Codex |
+| `Tab`      | Cycle through Claude Code, Codex, and OpenCode |
 | Type       | Filter sessions by keyword        |
 | `↑` / `↓` | Move up / down                    |
 | `Ctrl-O`   | Toggle the preview pane           |
@@ -109,7 +110,7 @@ Resuming hands the terminal to Claude Code, which replays the whole session tran
 └── last activity timestamp
 ```
 
-The preview pane (toggle with `Ctrl-O`) shows the project path, timestamps, and user prompts in the session. The count is the number of user prompts, for both sources.
+The preview pane (toggle with `Ctrl-O`) shows the project path, timestamps, and user prompts in the session. The count is the number of user prompts, for all three sources.
 
 ---
 
@@ -153,6 +154,20 @@ When `CODEX_HOME` is unset or empty, clauhist uses `~/.codex` and does not add a
 
 ---
 
+## OpenCode database
+
+OpenCode history is read directly from its local SQLite database, without starting an OpenCode server. Both the V1 (`session` / `message` / `part`) and V2 (`session_v2` / `session_message`) schemas are supported. If both exist, clauhist uses V2. Child-agent, archived, and remote-only sessions without a local directory are excluded.
+
+The default database is `~/.local/share/opencode/opencode.db`. Set `XDG_DATA_HOME` to use a different data directory, or `OPENCODE_DB` to select a database:
+
+```sh
+OPENCODE_DB="$HOME/work-history.db" clauhist --source opencode
+```
+
+Relative `OPENCODE_DB` paths are resolved under the OpenCode data directory, matching OpenCode. The resolved override is also passed when resuming a session. For development channels or a custom database filename, set `OPENCODE_DB` explicitly. SQLite is bundled into clauhist; no separate `sqlite3` command is required. Older OpenCode installations using JSON-file storage must migrate to SQLite first.
+
+---
+
 ## Shell integration (recommended)
 
 By default, clauhist resumes the session in a sub-shell running your `$SHELL` (falling back to zsh). Therefore, you need to `exit` — or run `clauhist --return` — to get back to the original directory. Both leave the sub-shell the normal way, so its shell history is written out; `clauhist --return` only works when you run it directly in the sub-shell clauhist started.
@@ -174,9 +189,9 @@ source ($nu.default-config-dir | path join "clauhist.nu")
 The wrapper is regenerated on every Nushell start, so it always matches the
 installed `clauhist` — no separate step is needed after upgrading.
 
-With this, selecting a session changes your current shell's directory and resumes Claude Code or Codex. After it exits, you remain in the project directory, and `cd -` takes you back.
+With this, selecting a session changes your current shell's directory and resumes Claude Code, Codex, or OpenCode. After it exits, you remain in the project directory, and `cd -` takes you back.
 
-After upgrading to a version with Codex support, reload your shell integration (`eval "$(clauhist init zsh)"`, or the command for your shell). Existing wrappers must be regenerated to recognize Codex selections. If you pasted the generated function into your shell configuration, replace it with the new `clauhist init <shell>` output.
+After upgrading to a version with OpenCode support, reload your shell integration (`eval "$(clauhist init zsh)"`, or the command for your shell). Existing wrappers must be regenerated to recognize OpenCode selections. If you pasted the generated function into your shell configuration, replace it with the new `clauhist init <shell>` output.
 
 ---
 
@@ -186,7 +201,7 @@ After upgrading to a version with Codex support, reload your shell integration (
 Install fzf: `brew install fzf` (macOS) or see the [fzf installation guide](https://github.com/junegunn/fzf#installation).
 
 **`No history found for this source`**
-Press `Tab` to check the other tool. For Claude Code, check `~/.claude/history.jsonl` (or `$CLAUDE_CONFIG_DIR/history.jsonl`). For Codex, check `~/.codex/sessions/` (or `$CODEX_HOME/sessions/`). Start a local session in the corresponding tool to create history.
+Press `Tab` to check the other tools. For Claude Code, check `~/.claude/history.jsonl` (or `$CLAUDE_CONFIG_DIR/history.jsonl`). For Codex, check `~/.codex/sessions/` (or `$CODEX_HOME/sessions/`). For OpenCode, check `~/.local/share/opencode/opencode.db`, `$XDG_DATA_HOME/opencode/opencode.db`, or your `OPENCODE_DB` override. Start a local session in the corresponding tool to create history.
 
 **`clauhist: command not found`**
 `~/.cargo/bin` is not in your `PATH`. Add `export PATH="$HOME/.cargo/bin:$PATH"` to `.zshrc`.
@@ -206,9 +221,9 @@ The project directory has been deleted or moved. clauhist resumes a session by `
 
 clauhist is a local-only tool that works entirely on your machine.
 
-- **What it reads:** Claude Code's `history.jsonl` and Codex's `sessions/**/*.jsonl` under their respective configuration directories. Codex rollouts contain transcripts; clauhist displays their session metadata and user prompts.
+- **What it reads:** Claude Code's `history.jsonl`, Codex's `sessions/**/*.jsonl`, and OpenCode's SQLite session/message tables under their respective data directories. Codex rollouts contain transcripts; clauhist displays their session metadata and user prompts.
 - **What it does NOT do:** clauhist does not call Anthropic or OpenAI APIs, and does not transmit history externally. Resuming starts the corresponding CLI, which uses its normal connection and settings.
-- **How it resumes sessions:** clauhist invokes `claude --resume <session-id>` or `codex resume <session-id>`. See the official [Claude Code CLI reference](https://docs.anthropic.com/en/docs/claude-code/cli-reference) and [Codex CLI reference](https://developers.openai.com/codex/cli/reference/#codex-resume).
+- **How it resumes sessions:** clauhist invokes `claude --resume <session-id>`, `codex resume <session-id>`, or `opencode --session <session-id>`. See the official [Claude Code CLI reference](https://docs.anthropic.com/en/docs/claude-code/cli-reference), [Codex CLI reference](https://developers.openai.com/codex/cli/reference/#codex-resume), and [OpenCode CLI reference](https://opencode.ai/docs/cli/).
 
 ---
 

@@ -2,7 +2,7 @@
 name = "clauhist"
 version = "1.4.0"
 edition = "2021"
-description = "Browse Claude Code and Codex history across working directories and resume sessions"
+description = "Browse Claude Code, Codex, and OpenCode history across working directories and resume sessions"
 license = "MIT"
 repository = "https://github.com/lef237/clauhist"
 
@@ -12,3 +12,4 @@ serde_json = "1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 clap = { version = "4", features = ["derive"] }
 libc = "0.2"
+rusqlite = { version = "0.41", features = ["bundled"] }

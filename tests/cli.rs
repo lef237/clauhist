@@ -281,12 +281,20 @@ fn cmd_init_nu_wrapper_consumes_three_line_contract() {
 }
 
 fn run_bash_wrapper_with_stub(stub_stdout: &str, stub_exit: i32) -> std::process::Output {
+    run_shell_wrapper_with_stub("bash", stub_stdout, stub_exit)
+}
+
+fn run_shell_wrapper_with_stub(
+    shell: &str,
+    stub_stdout: &str,
+    stub_exit: i32,
+) -> std::process::Output {
     // Sources the generated bash wrapper, then calls `clauhist` with PATH overridden
     // so `command clauhist` resolves to a stub that emits `stub_stdout` and exits
     // with `stub_exit`. `cd` and `claude` are functions that echo their args (and,
     // for `claude`, the config dir it was given) so we can observe what the wrapper
     // invoked them with.
-    let wrapper = run_init("bash");
+    let wrapper = run_init(shell);
     let stub_dir = unique_temp_path("bash-stub");
     std::fs::create_dir_all(&stub_dir).unwrap();
     let stub_path = stub_dir.join("clauhist");
@@ -307,12 +315,13 @@ fn run_bash_wrapper_with_stub(stub_stdout: &str, stub_exit: i32) -> std::process
          cd() {{ echo CD:\"$@\"; }}\n\
          claude() {{ echo CLAUDE:\"${{CLAUDE_CONFIG_DIR}}:$@\"; }}\n\
          codex() {{ echo CODEX:\"${{CODEX_HOME}}:$@\"; }}\n\
+         opencode() {{ echo OPENCODE:\"${{OPENCODE_DB}}:$@\"; }}\n\
          clauhist\n",
     );
     let mut path = std::env::var("PATH").unwrap_or_default();
     path = format!("{}:{path}", stub_dir.display());
 
-    let out = std::process::Command::new("bash")
+    let out = std::process::Command::new(shell)
         .arg("-c")
         .arg(&script)
         .env("PATH", &path)
@@ -320,6 +329,7 @@ fn run_bash_wrapper_with_stub(stub_stdout: &str, stub_exit: i32) -> std::process
         // otherwise leak into the stub's output and mask a missing one.
         .env_remove("CLAUDE_CONFIG_DIR")
         .env_remove("CODEX_HOME")
+        .env_remove("OPENCODE_DB")
         .output()
         .unwrap();
     std::fs::remove_dir_all(stub_dir).unwrap();
@@ -562,5 +572,234 @@ fn browser_resumes_codex_in_its_project_without_shell_integration() {
         )
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("Codex session ended."));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+fn write_opencode_session(path: &std::path::Path, project: &std::path::Path) {
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let db = rusqlite::Connection::open(path).unwrap();
+    db.execute_batch(
+        "CREATE TABLE session_v2 (id TEXT PRIMARY KEY, directory TEXT,
+        parent_id TEXT, time_created INTEGER, time_updated INTEGER, time_archived INTEGER);
+        CREATE TABLE session_message (id TEXT, session_id TEXT, type TEXT,
+        seq INTEGER, time_created INTEGER, data TEXT);",
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO session_v2 VALUES ('ses_test',?1,NULL,1000,3000,NULL)",
+        [project.to_str().unwrap()],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO session_message VALUES ('msg_test','ses_test','user',1,2000,?1)",
+        [r#"{"text":"OpenCode の履歴を確認"}"#],
+    )
+    .unwrap();
+}
+
+#[test]
+fn opencode_preview_uses_xdg_and_absolute_or_relative_database_overrides() {
+    let root = unique_temp_path("opencode-paths");
+    let default_db = root.join("opencode/opencode.db");
+    let custom_db = root.join("opencode/work.db");
+    write_opencode_session(&default_db, &root);
+    write_opencode_session(&custom_db, &root);
+    for db_override in [
+        None,
+        Some(""),
+        Some("work.db"),
+        Some(custom_db.to_str().unwrap()),
+    ] {
+        let mut cmd = std::process::Command::new(BIN);
+        cmd.args(["--source", "opencode", "preview", "ses_test"])
+            .env("XDG_DATA_HOME", &root);
+        match db_override {
+            Some(value) => cmd.env("OPENCODE_DB", value),
+            None => cmd.env_remove("OPENCODE_DB"),
+        };
+        let output = cmd.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("OpenCode の履歴を確認"), "{stdout}");
+        assert!(
+            stdout.contains(&format!("Project : {}", root.display())),
+            "{stdout}"
+        );
+        assert!(stdout.contains("Messages: 1"), "{stdout}");
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn browser_cycles_through_all_three_sources_and_preserves_opencode_database() {
+    let root = unique_temp_path("opencode-cycle");
+    let bin = root.join("bin");
+    let project = root.join("project's directory");
+    let database = root.join("opencode/work.db");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::create_dir_all(&bin).unwrap();
+    write_opencode_session(&database, &project);
+    // OpenCode -> Claude -> Codex -> OpenCode. Empty sources must stay switchable.
+    write_executable(
+        &bin.join("fzf"),
+        &format!(
+            r#"#!/bin/sh
+if [ "$1" = --version ]; then exit 0; fi
+printf '%s\n' "$@" >> {args}
+n=0
+if [ -f {state} ]; then n=$(cat {state}); fi
+n=$((n + 1))
+printf '%s' "$n" > {state}
+if [ "$n" -lt 4 ]; then
+    cat > /dev/null
+    printf 'tab\n'
+    exit 1
+fi
+printf '\n'
+head -n 1
+"#,
+            args = shell_quote(root.join("args").to_str().unwrap()),
+            state = shell_quote(root.join("state").to_str().unwrap())
+        ),
+    );
+    let output = std::process::Command::new(BIN)
+        .args(["--source", "opencode", "--print"])
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .env("CLAUDE_CONFIG_DIR", root.join("no-claude"))
+        .env("CODEX_HOME", root.join("no-codex"))
+        .env("XDG_DATA_HOME", &root)
+        .env("OPENCODE_DB", "work.db")
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!(
+            "clauhist:opencode\n{}\nses_test\n{}\n",
+            project.display(),
+            database.display()
+        )
+    );
+    let args = std::fs::read_to_string(root.join("args")).unwrap();
+    for header in ["OpenCode History", "Claude Code History", "Codex History"] {
+        assert!(args.contains(header), "{args}");
+    }
+    assert_eq!(args.matches("--source opencode preview {1}").count(), 2);
+    assert!(args.contains("--expect=tab"));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn shell_wrappers_resume_opencode_with_optional_database_override() {
+    for shell in ["bash", "zsh"] {
+        for config in [None, Some("/tmp/OpenCode's database $value.db")] {
+            let contract = format!(
+                "clauhist:opencode\n/tmp/project's directory\nses_test{}\n",
+                config.map(|cfg| format!("\n{cfg}")).unwrap_or_default()
+            );
+            let output = run_shell_wrapper_with_stub(shell, &contract, 0);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                stdout.contains("CD:-- /tmp/project's directory"),
+                "{stdout}"
+            );
+            assert!(
+                stdout.contains(&format!(
+                    "OPENCODE:{}:--session ses_test",
+                    config.unwrap_or("")
+                )),
+                "{stdout}"
+            );
+            assert!(
+                !stdout.contains("CLAUDE:") && !stdout.contains("CODEX:"),
+                "{stdout}"
+            );
+        }
+    }
+}
+
+#[test]
+fn opencode_reader_sees_live_wal_and_does_not_modify_database() {
+    let root = unique_temp_path("opencode-wal");
+    let database = root.join("opencode.db");
+    write_opencode_session(&database, &root);
+    let writer = rusqlite::Connection::open(&database).unwrap();
+    writer.pragma_update(None, "journal_mode", "WAL").unwrap();
+    writer
+        .execute(
+            "UPDATE session_message SET data=?1",
+            [r#"{"text":"committed WAL prompt"}"#],
+        )
+        .unwrap();
+    let before = std::fs::read(&database).unwrap();
+    let wal_before = std::fs::read(root.join("opencode.db-wal")).unwrap();
+    let output = std::process::Command::new(BIN)
+        .args(["--source", "opencode", "preview", "ses_test"])
+        .env("OPENCODE_DB", &database)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("committed WAL prompt"));
+    assert_eq!(std::fs::read(&database).unwrap(), before);
+    assert_eq!(
+        std::fs::read(root.join("opencode.db-wal")).unwrap(),
+        wal_before
+    );
+    drop(writer);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn browser_resumes_opencode_without_shell_integration() {
+    let root = unique_temp_path("opencode-resume");
+    let database = root.join("OpenCode's database.db");
+    let project = root.join("project with spaces");
+    let bin = root.join("bin");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::create_dir_all(&bin).unwrap();
+    write_opencode_session(&database, &project);
+    write_executable(
+        &bin.join("fzf"),
+        "#!/bin/sh\nif [ \"$1\" = --version ]; then exit 0; fi\nprintf '\\n'\nhead -n 1\n",
+    );
+    write_executable(
+        &bin.join("opencode"),
+        "#!/bin/sh\nprintf '%s\\n' \"$PWD\" \"$OPENCODE_DB\" \"$@\" > \"$RESUME_LOG\"\n",
+    );
+    write_executable(&bin.join("test-shell"), "#!/bin/sh\nexit 0\n");
+    let output = std::process::Command::new(BIN)
+        .args(["--source", "opencode"])
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .env("OPENCODE_DB", &database)
+        .env("SHELL", bin.join("test-shell"))
+        .env("RESUME_LOG", root.join("resumed"))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("resumed")).unwrap(),
+        format!(
+            "{}\n{}\n--session\nses_test\n",
+            project.display(),
+            database.display()
+        )
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("OpenCode session ended."));
     std::fs::remove_dir_all(root).unwrap();
 }

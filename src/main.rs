@@ -9,12 +9,15 @@ use clap::{Parser, Subcommand, ValueEnum};
 use serde::Deserialize;
 
 mod codex;
+mod opencode;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
 enum Source {
     #[default]
     Claude,
     Codex,
+    #[value(name = "opencode")]
+    OpenCode,
 }
 
 impl Source {
@@ -22,6 +25,7 @@ impl Source {
         match self {
             Self::Claude => "Claude Code",
             Self::Codex => "Codex",
+            Self::OpenCode => "OpenCode",
         }
     }
 
@@ -29,13 +33,15 @@ impl Source {
         match self {
             Self::Claude => "claude",
             Self::Codex => "codex",
+            Self::OpenCode => "opencode",
         }
     }
 
     fn toggle(self) -> Self {
         match self {
             Self::Claude => Self::Codex,
-            Self::Codex => Self::Claude,
+            Self::Codex => Self::OpenCode,
+            Self::OpenCode => Self::Claude,
         }
     }
 
@@ -43,6 +49,7 @@ impl Source {
         match self {
             Self::Claude => claude_config_dir_override(),
             Self::Codex => std::env::var("CODEX_HOME").ok().filter(|d| !d.is_empty()),
+            Self::OpenCode => opencode::config_override(),
         }
     }
 
@@ -50,6 +57,7 @@ impl Source {
         match self {
             Self::Claude => "CLAUDE_CONFIG_DIR",
             Self::Codex => "CODEX_HOME",
+            Self::OpenCode => "OPENCODE_DB",
         }
     }
 
@@ -57,6 +65,7 @@ impl Source {
         match self {
             Self::Claude => "claude --resume",
             Self::Codex => "codex resume",
+            Self::OpenCode => "opencode --session",
         }
     }
 
@@ -64,6 +73,13 @@ impl Source {
         match self {
             Self::Claude => build_sessions(parse_sessions(&read_history())),
             Self::Codex => codex::read_sessions(&codex::config_dir(), None),
+            Self::OpenCode => match opencode::read_sessions(&opencode::database_path(), None) {
+                Ok(sessions) => sessions,
+                Err(error) => {
+                    eprintln!("{error}");
+                    Vec::new()
+                }
+            },
         }
     }
 }
@@ -90,7 +106,7 @@ struct Session {
 #[command(
     name = "clauhist",
     version,
-    about = "Browse Claude Code and Codex history across working directories and resume sessions"
+    about = "Browse Claude Code, Codex, and OpenCode history across working directories and resume sessions"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -368,8 +384,8 @@ fn build_resume_cmd(
 /// what keeps a default installation on its usual `~/.claude.json` profile. The
 /// wrappers split on newlines, so every value must be newline-free for the
 /// contract to round-trip; returns `None` when any of them would break it.
-/// Codex selections prepend a `clauhist:codex` marker to this payload; their
-/// optional config directory is CODEX_HOME instead of CLAUDE_CONFIG_DIR.
+/// Other sources prepend `clauhist:codex` or `clauhist:opencode`; their optional
+/// config value is CODEX_HOME or OPENCODE_DB instead of CLAUDE_CONFIG_DIR.
 fn print_contract(project: &str, session_id: &str, config_dir: Option<&str>) -> Option<String> {
     if project.contains('\n') || session_id.contains('\n') {
         return None;
@@ -505,6 +521,9 @@ fn cmd_init(shell: &str) {
     if [[ "$out" == clauhist:codex$'\n'* ]]; then
         source="codex"
         out="${{out#*$'\n'}}"
+    elif [[ "$out" == clauhist:opencode$'\n'* ]]; then
+        source="opencode"
+        out="${{out#*$'\n'}}"
     fi
     [[ "$out" == *$'\n'* ]] || return
     local project="${{out%%$'\n'*}}"
@@ -519,6 +538,12 @@ fn cmd_init(shell: &str) {
             CODEX_HOME="$cfg" codex resume "$sid"
         else
             codex resume "$sid"
+        fi
+    elif [[ "$source" == "opencode" ]]; then
+        if [[ -n "$cfg" ]]; then
+            OPENCODE_DB="$cfg" opencode --session "$sid"
+        else
+            opencode --session "$sid"
         fi
     elif [[ -n "$cfg" ]]; then
         CLAUDE_CONFIG_DIR="$cfg" claude --resume "$sid"
@@ -538,6 +563,9 @@ fn cmd_init(shell: &str) {
     if test (count $out) -gt 0; and test "$out[1]" = clauhist:codex
         set source codex
         set -e out[1]
+    else if test (count $out) -gt 0; and test "$out[1]" = clauhist:opencode
+        set source opencode
+        set -e out[1]
     end
     set -l n (count $out)
     if test $n -lt 2 -o $n -gt 3
@@ -549,6 +577,12 @@ fn cmd_init(shell: &str) {
             env CODEX_HOME=$out[3] codex resume $out[2]
         else
             codex resume $out[2]
+        end
+    else if test "$source" = opencode
+        if test $n -eq 3
+            env OPENCODE_DB=$out[3] opencode --session $out[2]
+        else
+            opencode --session $out[2]
         end
     else if test $n -eq 3
         env CLAUDE_CONFIG_DIR=$out[3] claude --resume $out[2]
@@ -568,7 +602,8 @@ end"#
     }}
     let raw = ($result.stdout | str trim --right | lines)
     let is_codex = (($raw | first 1) == ["clauhist:codex"])
-    let lines = (if $is_codex {{ $raw | skip 1 }} else {{ $raw }})
+    let is_opencode = (($raw | first 1) == ["clauhist:opencode"])
+    let lines = (if $is_codex or $is_opencode {{ $raw | skip 1 }} else {{ $raw }})
     let n = ($lines | length)
     if $n < 2 or $n > 3 {{ return }}
     cd ($lines | get 0)
@@ -579,6 +614,14 @@ end"#
             }}
         }} else {{
             ^codex resume ($lines | get 1)
+        }}
+    }} else if $is_opencode {{
+        if $n == 3 {{
+            with-env {{ OPENCODE_DB: ($lines | get 2) }} {{
+                ^opencode --session ($lines | get 1)
+            }}
+        }} else {{
+            ^opencode --session ($lines | get 1)
         }}
     }} else if $n == 3 {{
         with-env {{ CLAUDE_CONFIG_DIR: ($lines | get 2) }} {{
@@ -749,7 +792,7 @@ fn cmd_browse(mut source: Source, print_mode: bool, exe_path: &str) {
         };
         let project = session.project.as_str();
 
-        // Both tools resume in the selected working directory.
+        // Each tool resumes in the selected working directory.
         if !std::path::Path::new(project).is_dir() {
             eprintln!("Project directory no longer exists: {}", project);
             eprintln!("Sessions marked ✗ cannot be resumed.");
@@ -762,14 +805,14 @@ fn cmd_browse(mut source: Source, print_mode: bool, exe_path: &str) {
         let config_dir = source.config_override();
 
         if print_mode {
-            // Keep Claude's existing payload, with a marker for Codex selections.
+            // Keep Claude's existing payload, with a marker for other sources.
             // Each wrapper formats its own cd and resume command from these values.
             match print_contract(project, session_id, config_dir.as_deref()) {
                 Some(out) => {
                     // stderr: stdout is the contract the wrapper parses.
                     eprintln!("{}", loading_notice(project, session_id));
-                    if source == Source::Codex {
-                        println!("clauhist:codex");
+                    if source != Source::Claude {
+                        println!("clauhist:{}", source.argument());
                     }
                     println!("{out}");
                 }
@@ -834,6 +877,18 @@ fn main() {
                     print!("{}", render_preview(session));
                 } else {
                     println!("Session not found: {session_id}");
+                }
+            }
+            Source::OpenCode => {
+                match opencode::read_sessions(&opencode::database_path(), Some(&session_id)) {
+                    Ok(sessions) => match sessions.first() {
+                        Some(session) => print!("{}", render_preview(session)),
+                        None => println!("Session not found: {session_id}"),
+                    },
+                    Err(error) => {
+                        eprintln!("{error}");
+                        std::process::exit(1);
+                    }
                 }
             }
         },
