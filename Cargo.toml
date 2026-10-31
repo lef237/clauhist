@@ -1,6 +1,6 @@
 [package]
 name = "clauhist"
-version = "1.4.0"
+version = "1.5.0"
 edition = "2021"
 description = "Browse Claude Code, Codex, and OpenCode history across working directories and resume sessions"
 license = "MIT"

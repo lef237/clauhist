@@ -40,7 +40,7 @@ For Codex, clauhist reads local session rollouts under `~/.codex/sessions/` (or 
 | Dependency | Required |
 |------------|----------|
 | [Rust](https://rustup.rs/) | Build only |
-| [fzf](https://github.com/junegunn/fzf) | **Runtime** |
+| [fzf](https://github.com/junegunn/fzf) 0.49.0 or newer | **Runtime** |
 | [Claude Code](https://docs.anthropic.com/en/docs/claude-code) / [Codex CLI](https://developers.openai.com/codex/cli/) / [OpenCode](https://opencode.ai/docs/cli/) | **Runtime**, for the sessions you resume |
 
 > **Note:** fzf provides the interactive UI — clauhist will not work without it.
