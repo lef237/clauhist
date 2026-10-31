@@ -693,8 +693,8 @@ fn cmd_return() {
     std::process::exit(0);
 }
 
-const PREVIEW_LABEL: &str = " ↕ Drag to resize · Ctrl-X: expand ";
-const EXPANDED_PREVIEW_LABEL: &str = " ↕ Drag to resize · Ctrl-X: restore ";
+const PREVIEW_LABEL: &str = " ↕ Drag to resize · Ctrl-P: expand ";
+const EXPANDED_PREVIEW_LABEL: &str = " ↕ Drag to resize · Ctrl-P: restore ";
 
 fn preview_expand_binding() -> String {
     // FZF_LINES excludes the outer border. Reserve three list rows plus the
@@ -718,7 +718,7 @@ fi"#,
         )),
     );
     // fzf may use fish as its command shell; keep the calculation POSIX.
-    format!("--bind=ctrl-x:transform:sh -c {}", shell_quote(&script))
+    format!("--bind=ctrl-p:transform:sh -c {}", shell_quote(&script))
 }
 
 fn cmd_browse(mut source: Source, print_mode: bool, exe_path: &str) {

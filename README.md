@@ -10,7 +10,7 @@ Browse Claude Code, Codex, and OpenCode history across working directories and r
 │ > 2026-03-18 09:12  ✓ ~/projects/myapp      Tell me about Rust error handling…  (12)  │
 │   2026-03-17 22:45  ✓ ~/sandbox/api-client  Generate client from OpenAPI schema  (8)  │
 │   2026-03-17 14:30  ✗ ~/old-project         Database migration steps             (3)  │
-├────────────────── ↕ Drag to resize · Ctrl-X: expand ─────────────────────────────────────┤
+├────────────────── ↕ Drag to resize · Ctrl-P: expand ─────────────────────────────────────┤
 │ Project : ~/projects/myapp                                                             │
 │ [09:12] Tell me about Rust error handling…                                              │
 ╰───────────────────────────────────────────────────────────────────────────────────────╯
@@ -99,7 +99,7 @@ Resuming hands the terminal to Claude Code, which replays the whole session tran
 | `Tab`      | Cycle through Claude Code, Codex, and OpenCode |
 | Type       | Filter sessions by keyword        |
 | `↑` / `↓` | Move up / down                    |
-| `Ctrl-X`   | Expand the preview / restore the normal half-height layout |
+| `Ctrl-P`   | Expand the preview / restore the normal half-height layout |
 | `Ctrl-C`   | Cancel and exit                   |
 
 ### Reading the list
@@ -117,10 +117,10 @@ The browser opens with the session list above and the preview pane below, each u
 Its top border includes a resize handle and a keyboard hint:
 
 ```text
-────── ↕ Drag to resize · Ctrl-X: expand ──────
+────── ↕ Drag to resize · Ctrl-P: expand ──────
 ```
 
-Drag this border up or down to adjust the split. Press `Ctrl-X` to expand the preview while leaving about three session rows visible, so it remains clear that you can browse the list with `↑` / `↓`. The size is calculated from the current window height; very short windows may show fewer rows. The border hint changes to `Ctrl-X: restore` while expanded. Press `Ctrl-X` again to return to the normal 50/50 split. Both panes remain visible in either layout, and you can still drag the border to give the preview more space.
+Drag this border up or down to adjust the split. Press `Ctrl-P` to expand the preview while leaving about three session rows visible, so it remains clear that you can browse the list with `↑` / `↓`. The size is calculated from the current window height; very short windows may show fewer rows. The border hint changes to `Ctrl-P: restore` while expanded. Press `Ctrl-P` again to return to the normal 50/50 split. Both panes remain visible in either layout, and you can still drag the border to give the preview more space.
 
 ---
 
