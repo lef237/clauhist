@@ -693,6 +693,34 @@ fn cmd_return() {
     std::process::exit(0);
 }
 
+const PREVIEW_LABEL: &str = " ↕ Drag to resize · Ctrl-X: expand ";
+const EXPANDED_PREVIEW_LABEL: &str = " ↕ Drag to resize · Ctrl-X: restore ";
+
+fn preview_expand_binding() -> String {
+    // FZF_LINES excludes the outer border. Reserve three list rows plus the
+    // header, search prompt, status line, and preview's top border (7 rows).
+    // Absolute preview sizes count content rows, unlike percentage sizes.
+    // The label tracks the toggle state even after a manual drag or resize.
+    let script = format!(
+        r#"
+if [ "$FZF_PREVIEW_LABEL" = {expanded_label} ]; then
+    printf '%s\n' {restore}
+else
+    rows=$(( FZF_LINES - 7 ))
+    normal=$(( FZF_LINES / 2 - 1 ))
+    if [ "$rows" -lt "$normal" ]; then rows=$normal; fi
+    if [ "$rows" -lt 1 ]; then rows=1; fi
+    printf 'change-preview-window(%s)+change-preview-label(%s)\n' "$rows" {expanded_label}
+fi"#,
+        expanded_label = shell_quote(EXPANDED_PREVIEW_LABEL),
+        restore = shell_quote(&format!(
+            "change-preview-window()+change-preview-label({PREVIEW_LABEL})"
+        )),
+    );
+    // fzf may use fish as its command shell; keep the calculation POSIX.
+    format!("--bind=ctrl-x:transform:sh -c {}", shell_quote(&script))
+}
+
 fn cmd_browse(mut source: Source, print_mode: bool, exe_path: &str) {
     if !fzf_is_available() {
         eprintln!("fzf not found. Install with: brew install fzf");
@@ -724,16 +752,14 @@ fn cmd_browse(mut source: Source, print_mode: bool, exe_path: &str) {
             "--with-nth=2,3,4,5".to_string(),
             format!("--preview={}", preview_cmd),
             "--preview-window=down:50%:wrap:border-top:nohidden".to_string(),
-            "--preview-label= ↕ Drag to resize · Ctrl-X: expand/restore ".to_string(),
+            format!("--preview-label={PREVIEW_LABEL}"),
             "--height=85%".to_string(),
             "--border=rounded".to_string(),
             format!("--header={header}"),
             "--expect=tab".to_string(),
             "--prompt=Search: ".to_string(),
             "--no-sort".to_string(),
-            // fzf clamps 99% to its largest preview while keeping the finder
-            // usable. An empty alternative restores the initial 50% layout.
-            "--bind=ctrl-x:change-preview-window(99%|)".to_string(),
+            preview_expand_binding(),
         ];
 
         let mut child = match Command::new("fzf")
