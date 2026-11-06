@@ -10,6 +10,7 @@ use serde::Deserialize;
 
 mod codex;
 mod opencode;
+mod titles;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
 enum Source {
@@ -729,7 +730,13 @@ fn cmd_browse(mut source: Source, print_mode: bool, exe_path: &str) {
 
     loop {
         let sessions = source.sessions();
-        let lines = format_for_fzf(&sessions);
+        let mut lines = format_for_fzf(&sessions);
+        // Claude Code keeps session names in the transcripts, not in the
+        // history file every source is built from, so they are read separately
+        // and only for the source that has them.
+        if source == Source::Claude {
+            titles::insert_names(&mut lines, &claude_config_dir());
+        }
         let fzf_input = lines.join("\n");
         let preview_cmd = format!(
             "{} --source {} preview {{1}}",
@@ -749,7 +756,10 @@ fn cmd_browse(mut source: Source, print_mode: bool, exe_path: &str) {
 
         let fzf_args: Vec<String> = vec![
             "--delimiter=\t".to_string(),
-            "--with-nth=2,3,4,5".to_string(),
+            // Field 4 is the session name, which only Claude Code has. fzf
+            // ignores a field a line does not reach, so the other sources keep
+            // displaying and matching exactly fields 2 to 5.
+            "--with-nth=2,3,4,5,6".to_string(),
             format!("--preview={}", preview_cmd),
             "--preview-window=down:50%:wrap:border-top:nohidden".to_string(),
             format!("--preview-label={PREVIEW_LABEL}"),
