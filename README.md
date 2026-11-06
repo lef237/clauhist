@@ -105,12 +105,15 @@ Resuming hands the terminal to Claude Code, which replays the whole session tran
 ### Reading the list
 
 ```
-2026-03-18 09:12  ✓ ~/projects/myapp  First message preview…  (12)
-│                 │                                             └── message count
+2026-03-18 09:12  ✓ ~/projects/myapp  error-handling  First message preview…  (12)
+│                 │                    │                                       └── message count
+│                 │                    └── session name, when the session has one
 │                 └── ✓ project directory exists
 │                     ✗ directory not found (deleted or moved)
 └── last activity timestamp
 ```
+
+Every column is searchable, the name included: typing `error-handling` finds that session even when the name appears in no prompt. Claude Code names a session itself once it has seen a little of the conversation, and `/rename` replaces that name with your own — a name you set always wins over the generated one. Names come from the session transcripts under `projects/`, so they are shown for Claude Code sessions; Codex and OpenCode rows leave the column empty and read exactly as before.
 
 The browser opens with the session list above and the preview pane below, each using half of the window. The preview shows the project path, timestamps, and user prompts in the session. The count is the number of user prompts, for all three sources.
 
